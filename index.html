@@ -1,0 +1,1123 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#eeece4">
+  <meta name="description" content="Семейный список дел, вознаграждений и выплат.">
+  <meta name="application-name" content="Наши дела">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icon.svg">
+  <title>Наши дела</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #25332d;
+      --muted: #78827b;
+      --paper: #eeece4;
+      --card: #fbfaf6;
+      --green: #376b52;
+      --green-light: #e4efe5;
+      --orange: #e2a35d;
+      --line: #dedcd2;
+      --red: #a74b43;
+      font-family: "Segoe UI", "Arial", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      min-height: 100vh;
+      background: var(--paper);
+      color: var(--ink);
+    }
+
+    button, input, textarea { font: inherit; }
+    button { cursor: pointer; }
+
+    .shell {
+      width: min(100% - 32px, 920px);
+      margin: 0 auto;
+      padding: 28px 0 56px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 32px;
+    }
+
+    .brand { display: flex; align-items: center; gap: 11px; }
+    .brand-mark {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      border-radius: 15px;
+      background: var(--green-light);
+      font-size: 22px;
+    }
+    .brand-name { font-size: 17px; font-weight: 750; letter-spacing: -.3px; }
+    .demo-badge {
+      padding: 8px 11px;
+      border: 1px solid #e8d6bc;
+      border-radius: 99px;
+      background: #fff7eb;
+      color: #825a2e;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    main { max-width: 720px; margin: 0 auto; }
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--green);
+      font-size: 13px;
+      font-weight: 750;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    h1 { margin: 0; font-size: clamp(29px, 6vw, 42px); letter-spacing: -1.3px; }
+    .intro { margin: 12px 0 26px; color: var(--muted); line-height: 1.55; }
+
+    .panel, .balance-card, .task, .request, .member-card {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--card);
+      box-shadow: 0 5px 18px #3b473b0a;
+    }
+    .panel { padding: clamp(20px, 5vw, 30px); }
+    .field { display: grid; gap: 8px; margin: 18px 0; }
+    label { font-size: 14px; font-weight: 650; }
+    input, textarea {
+      width: 100%;
+      border: 1px solid #dcded6;
+      border-radius: 12px;
+      background: #fff;
+      color: var(--ink);
+      padding: 13px 14px;
+      outline: none;
+    }
+    input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px #376b5217; }
+    textarea { min-height: 92px; resize: vertical; }
+    .role-grid, .task-grid, .request-list, .member-list { display: grid; gap: 12px; }
+    .role-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 20px 0; }
+    .role-option {
+      min-height: 94px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--card);
+      color: var(--ink);
+      font-size: 17px;
+      font-weight: 700;
+    }
+    .role-option[aria-pressed="true"] { border-color: var(--green); background: var(--green-light); }
+    .button {
+      display: inline-flex;
+      min-height: 46px;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border: 0;
+      border-radius: 12px;
+      background: var(--green);
+      color: white;
+      padding: 11px 18px;
+      font-weight: 700;
+    }
+    .button:hover { filter: brightness(.96); }
+    .button:disabled { cursor: wait; opacity: .65; }
+    .button.secondary { border: 1px solid var(--line); background: white; color: var(--ink); }
+    .button.danger { background: #a74b43; }
+    .button.small { min-height: 38px; padding: 8px 12px; font-size: 14px; }
+    .form-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+    .hint { margin: 9px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .error { min-height: 20px; margin: 10px 0 0; color: var(--red); font-size: 14px; }
+
+    .dashboard-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 22px;
+    }
+    .balance-card {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 26px;
+      padding: 21px 24px;
+      background: var(--green-light);
+    }
+    .balance-label { color: #496552; font-size: 14px; font-weight: 650; }
+    .balance-value { margin-top: 5px; font-size: clamp(30px, 7vw, 40px); font-weight: 800; letter-spacing: -1px; }
+    .balance-icon { font-size: 34px; }
+    .balance-topline { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .payout-request-button {
+      display: grid;
+      width: 40px;
+      height: 40px;
+      flex: 0 0 auto;
+      place-items: center;
+      border: 1px solid #c8d8c8;
+      border-radius: 12px;
+      background: #fffefa;
+      color: var(--green);
+    }
+    .payout-request-button:hover:not(:disabled) { background: white; border-color: var(--green); }
+    .payout-request-button:disabled { cursor: not-allowed; opacity: .48; }
+    .payout-note { margin: 10px 0 0; color: #815b2f; font-size: 13px; font-weight: 650; }
+    .section-heading {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 25px 0 12px;
+    }
+    h2 { margin: 0; font-size: 20px; letter-spacing: -.4px; }
+    .section-note { color: var(--muted); font-size: 13px; }
+    .task-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .task {
+      display: flex;
+      min-height: 126px;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 18px;
+      color: var(--ink);
+      text-align: left;
+      transition: transform .12s, border-color .12s;
+    }
+    .task:hover { transform: translateY(-2px); border-color: #aac3ad; }
+    .task:active { background: var(--green-light); }
+    .task-name { font-size: 17px; font-weight: 700; }
+    .task-price { color: var(--green); font-size: 20px; font-weight: 800; }
+    .request {
+      position: relative;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 17px;
+    }
+    .request.has-delete { padding-right: 58px; }
+    .request + .request { margin-top: 10px; }
+    .request-title { font-weight: 750; }
+    .request-meta { margin-top: 5px; color: var(--muted); font-size: 13px; }
+    .request-comment { margin-top: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+    .request-actions { display: flex; flex-shrink: 0; gap: 7px; }
+    .delete-request {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      display: grid;
+      width: 36px;
+      height: 36px;
+      place-items: center;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+      color: #78827b;
+    }
+    .delete-request:hover { background: #fae9e7; color: var(--red); }
+    .delete-request:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+    .status { color: #815b2f; font-size: 13px; font-weight: 700; }
+    .status.approved { color: var(--green); }
+    .status.rejected { color: var(--red); }
+    .member-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .member-card { display: flex; justify-content: space-between; gap: 10px; padding: 15px; }
+    .member-role { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .member-balance { color: var(--green); font-weight: 750; white-space: nowrap; }
+    .empty {
+      padding: 22px;
+      border: 1px dashed #d5d9d0;
+      border-radius: 16px;
+      color: var(--muted);
+      text-align: center;
+    }
+    .history {
+      margin-top: 22px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--card);
+    }
+    .history summary {
+      display: flex;
+      min-height: 56px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 15px 18px;
+      cursor: pointer;
+      font-weight: 750;
+      list-style: none;
+    }
+    .history summary::-webkit-details-marker { display: none; }
+    .history summary::after { content: "+"; color: var(--green); font-size: 22px; font-weight: 500; }
+    .history[open] summary::after { content: "−"; }
+    .history-content { display: grid; gap: 10px; padding: 0 14px 14px; }
+    .history-content .request { background: white; }
+    .history .empty { margin: 0; }
+    .payout-blocking { z-index: 10; }
+    .payout-blocking-card { text-align: center; padding: clamp(28px, 7vw, 48px); }
+    .payout-blocking-card h2 { font-size: clamp(25px, 6vw, 34px); }
+    .payout-amount { margin: 18px 0; color: var(--green); font-size: clamp(36px, 9vw, 54px); font-weight: 800; }
+    .payout-blocking-card .form-actions { justify-content: center; }
+    .payout-blocking-card .button { min-height: 54px; padding: 14px 24px; font-size: 17px; }
+    .modal {
+      position: fixed;
+      z-index: 5;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      background: #17231dcc;
+    }
+    .modal-card {
+      width: min(100%, 440px);
+      max-height: min(90vh, 680px);
+      overflow: auto;
+      border-radius: 20px;
+      background: var(--card);
+      padding: 24px;
+      box-shadow: 0 18px 60px #0003;
+    }
+    .modal-card h2 { margin-bottom: 8px; }
+    .modal-card .intro { margin: 0 0 18px; }
+    .disclaimer {
+      margin-top: 30px;
+      padding: 13px 15px;
+      border-radius: 12px;
+      background: #f0eee7;
+      color: #656c64;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .hidden { display: none !important; }
+
+    @media (max-width: 560px) {
+      .shell { width: min(100% - 24px, 920px); padding-top: 17px; }
+      .topbar { margin-bottom: 25px; }
+      .role-grid, .task-grid, .member-list { grid-template-columns: 1fr; }
+      .task { min-height: 100px; flex-direction: row; align-items: center; }
+      .request { flex-direction: column; }
+      .request-actions { width: 100%; }
+      .request-actions .button { flex: 1; }
+      .dashboard-head { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">🏡</div>
+        <div class="brand-name">Наши дела</div>
+      </div>
+      <div class="demo-badge">Прототип · данные пока только на этом устройстве</div>
+    </header>
+    <main id="app" aria-live="polite"></main>
+  </div>
+
+  <script>
+    "use strict";
+
+    const STORAGE_KEY = "family-chores-prototype-v1";
+    const DEMO_STATE = {
+      pin: null,
+      members: [],
+      tasks: [
+        { id: "dishes", title: "Помыть посуду", price: 20, active: true },
+        { id: "room", title: "Убрать комнату", price: 40, active: true },
+        { id: "plants", title: "Полить цветы", price: 15, active: true },
+        { id: "table", title: "Накрыть на стол", price: 10, active: true }
+      ],
+      requests: [],
+      payments: []
+    };
+
+    let state = loadState();
+    let selectedRole = "";
+    let currentMemberId = "";
+    let addingMember = false;
+    let modal = null;
+    let pendingParentAction = null;
+    let choreHistoryOpen = false;
+    let paymentHistoryOpen = false;
+    let notice = "";
+
+    function loadState() {
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (!saved) return structuredClone(DEMO_STATE);
+        const parsed = JSON.parse(saved);
+        return {
+          ...structuredClone(DEMO_STATE),
+          ...parsed,
+          members: Array.isArray(parsed.members) ? parsed.members : [],
+          tasks: Array.isArray(parsed.tasks) ? parsed.tasks : structuredClone(DEMO_STATE.tasks),
+          requests: Array.isArray(parsed.requests) ? parsed.requests : [],
+          payments: Array.isArray(parsed.payments) ? parsed.payments : []
+        };
+      } catch (error) {
+        console.error("Не удалось загрузить сохранённые данные.", error);
+        return structuredClone(DEMO_STATE);
+      }
+    }
+
+    function saveState() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, char => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      })[char]);
+    }
+
+    function money(value) {
+      return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(value) + " ₽";
+    }
+
+    function memberBalance(memberId) {
+      const earned = state.requests
+        .filter(request => request.memberId === memberId && request.status === "approved")
+        .reduce((sum, request) => sum + Math.round(Number(request.price) * 100), 0);
+      const paid = state.payments
+        .filter(payment => payment.memberId === memberId &&
+          (payment.status === "awaiting_child_confirmation" || payment.status === "confirmed"))
+        .reduce((sum, payment) => sum + Math.round(Number(payment.amount) * 100), 0);
+      return (earned - paid) / 100;
+    }
+
+    function availableForPayout(memberId) {
+      const reserved = state.payments
+        .filter(payment => payment.memberId === memberId && payment.status === "requested")
+        .reduce((sum, payment) => sum + Math.round(Number(payment.amount) * 100), 0);
+      return Math.max(0, Math.round(memberBalance(memberId) * 100) - reserved) / 100;
+    }
+
+    function formatTimestamp(value) {
+      const date = new Date(value);
+      return Number.isNaN(date.getTime())
+        ? String(value || "")
+        : new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short" }).format(date);
+    }
+
+    function paymentStatusLabel(status) {
+      return status === "requested"
+        ? "Запрошена"
+        : status === "awaiting_child_confirmation"
+          ? "Не подтверждено ребёнком"
+          : "Получение подтверждено";
+    }
+
+    function memberName(memberId) {
+      return state.members.find(member => member.id === memberId)?.name || "Участник";
+    }
+
+    function renderPaymentHistory(memberId, includeAll) {
+      const payments = state.payments
+        .filter(payment => includeAll || payment.memberId === memberId)
+        .slice()
+        .reverse();
+      const rows = payments.length ? payments.map(payment => `
+        <article class="request">
+          <div>
+            <div class="request-title">${includeAll ? `${escapeHtml(memberName(payment.memberId))} · ` : ""}${money(payment.amount)}</div>
+            <div class="request-meta">Запрос: ${escapeHtml(formatTimestamp(payment.createdAt))}</div>
+            ${payment.paidAt ? `<div class="request-meta">Оплачено: ${escapeHtml(formatTimestamp(payment.paidAt))}</div>` : ""}
+            ${payment.confirmedAt ? `<div class="request-meta">Получение подтверждено: ${escapeHtml(formatTimestamp(payment.confirmedAt))}</div>` : ""}
+            <div class="request-meta status ${payment.status === "confirmed" ? "approved" : "pending"}">${paymentStatusLabel(payment.status)}</div>
+          </div>
+        </article>
+      `).join("") : `<div class="empty">Выплат пока нет.</div>`;
+      return `
+        <details class="history payment-history" id="payment-history" ${paymentHistoryOpen ? "open" : ""}>
+          <summary>История выплат <span class="section-note">${payments.length}</span></summary>
+          <div class="history-content">${rows}</div>
+        </details>
+      `;
+    }
+
+    function render() {
+      const app = document.getElementById("app");
+      if (addingMember || state.members.length === 0) {
+        showPage(app, renderSetup());
+        return;
+      }
+      if (!currentMemberId || !state.members.some(member => member.id === currentMemberId)) {
+        showPage(app, renderLogin());
+        return;
+      }
+      const member = state.members.find(item => item.id === currentMemberId);
+      showPage(app, member.role === "parent" ? renderParent(member) : renderChild(member));
+    }
+
+    function showPage(app, content) {
+      app.innerHTML = content + renderModal();
+    }
+
+    function renderModal() {
+      const activeMember = state.members.find(item => item.id === currentMemberId);
+      if (activeMember?.role === "child") {
+        const unconfirmedPayment = state.payments.find(payment =>
+          payment.memberId === activeMember.id && payment.status === "awaiting_child_confirmation"
+        );
+        if (unconfirmedPayment) {
+          return `
+            <div class="modal payout-blocking" role="presentation">
+              <section class="modal-card payout-blocking-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+                <p class="eyebrow">Выплата</p>
+                <h2 id="modal-title">Родитель произвёл оплату</h2>
+                <p class="balance-label">Текущий баланс</p>
+                <p class="balance-value">${money(memberBalance(activeMember.id))}</p>
+                <p class="payout-note">Выплата: ${money(unconfirmedPayment.amount)} · Не подтверждено</p>
+                <p class="intro">Эта сумма уже учтена в балансе. Подтверди, пожалуйста, что получил(а) её.</p>
+                <form id="payment-confirmation-form">
+                  <div class="form-actions"><button class="button" type="submit">Подтвердить получение</button></div>
+                </form>
+              </section>
+            </div>
+          `;
+        }
+      }
+      if (!modal) return "";
+      if (modal.type === "task") {
+        const task = state.tasks.find(item => item.id === modal.taskId);
+        if (!task) return "";
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">Отправить дело?</h2>
+              <p class="intro">${escapeHtml(task.title)} · ${money(task.price)}</p>
+              <form id="request-form">
+                <div class="field"><label for="child-comment">Комментарий (необязательно)</label><textarea id="child-comment" name="comment" maxlength="500" placeholder="Например: помыл всю посуду после ужина"></textarea></div>
+                <div class="form-actions"><button class="button" type="submit">Отправить родителю</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
+              </form>
+            </section>
+          </div>
+        `;
+      }
+      if (modal.type === "review") {
+        const request = state.requests.find(item => item.id === modal.requestId);
+        if (!request) return "";
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">${modal.status === "approved" ? "Подтвердить дело?" : "Отклонить дело?"}</h2>
+              <p class="intro">${escapeHtml(memberName(request.memberId))} · ${escapeHtml(request.taskTitle)} · ${money(request.price)}</p>
+              ${request.comment ? `<p class="request-comment">Комментарий ребёнка: «${escapeHtml(request.comment)}»</p>` : ""}
+              <form id="review-form">
+                ${modal.status === "rejected" ? `<div class="field"><label for="parent-comment">Комментарий ребёнку (необязательно)</label><textarea id="parent-comment" name="parentComment" maxlength="500"></textarea></div>` : ""}
+                <div class="field"><label for="review-pin">PIN родителей</label><input id="review-pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required></div>
+                <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
+                <div class="form-actions"><button class="button ${modal.status === "rejected" ? "danger" : ""}" type="submit">${modal.status === "approved" ? "Подтвердить" : "Отклонить"}</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
+              </form>
+            </section>
+          </div>
+        `;
+      }
+      if (modal.type === "parent-pin") {
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">Подтвердите действие</h2>
+              <p class="intro">Введите четырёхзначный PIN родителей.</p>
+              <form id="parent-pin-form">
+                <div class="field"><label for="action-pin">PIN родителей</label><input id="action-pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required></div>
+                <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
+                <div class="form-actions"><button class="button" type="submit">Продолжить</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
+              </form>
+            </section>
+          </div>
+        `;
+      }
+      if (modal.type === "payout-request") {
+        const maximum = availableForPayout(currentMemberId);
+        if (maximum <= 0) return "";
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">Запросить выплату</h2>
+              <p class="intro">Доступно к запросу: ${money(maximum)}</p>
+              <form id="payout-request-form">
+                <div class="field"><label for="payout-amount">Сумма, ₽</label><input id="payout-amount" name="amount" type="number" min="0.01" max="${maximum}" step="0.01" value="${maximum}" required></div>
+                <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
+                <div class="form-actions"><button class="button" type="submit">Отправить запрос</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
+              </form>
+            </section>
+          </div>
+        `;
+      }
+      if (modal.type === "pay-request") {
+        const payment = state.payments.find(item => item.id === modal.paymentId && item.status === "requested");
+        if (!payment) return "";
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">Подтвердить оплату?</h2>
+              <p class="intro">${escapeHtml(memberName(payment.memberId))} · ${money(payment.amount)}</p>
+              <p class="hint">После подтверждения сумма сразу вычтется из доступного баланса. Ребёнку нужно будет подтвердить получение.</p>
+              <form id="pay-request-form">
+                <div class="field"><label for="pay-pin">PIN родителей</label><input id="pay-pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required></div>
+                <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
+                <div class="form-actions"><button class="button" type="submit">Произвести оплату</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
+              </form>
+            </section>
+          </div>
+        `;
+      }
+      if (modal.type === "delete-request") {
+        const request = state.requests.find(item =>
+          item.id === modal.requestId &&
+          item.memberId === currentMemberId &&
+          item.status === "pending"
+        );
+        if (!request) return "";
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">Удалить отправленное дело?</h2>
+              <p class="intro">${escapeHtml(request.taskTitle)} · ${money(request.price)}</p>
+              <p class="hint">Заявка исчезнет из списка родителя. Это действие нельзя отменить.</p>
+              <div class="form-actions">
+                <button class="button danger" type="button" data-confirm-delete="${escapeHtml(request.id)}">Удалить</button>
+                <button class="button secondary" type="button" data-close-modal>Оставить</button>
+              </div>
+            </section>
+          </div>
+        `;
+      }
+      return "";
+    }
+
+    function renderSetup() {
+      const parentsFull = state.members.filter(member => member.role === "parent").length >= 2;
+      const childrenFull = state.members.filter(member => member.role === "child").length >= 2;
+      return `
+        <p class="eyebrow">Семейный помощник</p>
+        <h1>${addingMember ? "Добавим участника" : "Начнём знакомство"}</h1>
+        <p class="intro">${addingMember ? "Выберите роль и укажите имя нового участника семьи." : "Выберите роль и укажите имя. В этом прототипе можно добавить участников по очереди на одном устройстве."}</p>
+        <section class="panel">
+          <div class="role-grid">
+            <button type="button" class="role-option" data-role="child" aria-pressed="${selectedRole === "child"}" ${childrenFull ? "disabled" : ""}>Ребёнок</button>
+            <button type="button" class="role-option" data-role="parent" aria-pressed="${selectedRole === "parent"}" ${parentsFull ? "disabled" : ""}>Родитель</button>
+          </div>
+          <form id="setup-form">
+            <div class="field">
+              <label for="member-name">Ваше имя</label>
+              <input id="member-name" name="name" maxlength="40" autocomplete="name" placeholder="Например, Маша" required>
+            </div>
+            <div id="pin-field" class="field ${selectedRole === "parent" && (!state.pin || addingMember) ? "" : "hidden"}">
+              <label for="parent-pin">${addingMember && state.pin ? "Введите текущий PIN родителей" : "Придумайте общий PIN родителей"}</label>
+              <input id="parent-pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="4 цифры" ${selectedRole === "parent" && (!state.pin || addingMember) ? "required" : ""}>
+              ${!addingMember && !state.pin ? `<p class="hint">Оба родителя будут использовать этот код для подтверждения дел и редактирования.</p>` : ""}
+            </div>
+            <p class="error" id="form-error">${escapeHtml(notice)}</p>
+            <div class="form-actions"><button class="button" type="submit">Продолжить</button></div>
+          </form>
+        </section>
+        <div class="disclaimer">Это локальный черновик: пока данные сохраняются только в браузере этого устройства. Не используйте здесь настоящий PIN.</div>
+      `;
+    }
+
+    function renderLogin() {
+      const members = state.members.map(member =>
+        `<option value="${escapeHtml(member.id)}">${escapeHtml(member.name)} — ${member.role === "parent" ? "родитель" : "ребёнок"}</option>`
+      ).join("");
+      return `
+        <p class="eyebrow">С возвращением</p>
+        <h1>Кто сейчас у экрана?</h1>
+        <p class="intro">Выберите свой профиль, чтобы открыть семейную панель.</p>
+        <section class="panel">
+          <form id="login-form">
+            <div class="field"><label for="member-select">Профиль</label><select id="member-select" name="memberId">${members}</select></div>
+            <p class="error" id="form-error">${escapeHtml(notice)}</p>
+            <div class="form-actions"><button class="button" type="submit">Открыть</button><button class="button secondary" type="button" id="add-member">Добавить участника</button></div>
+          </form>
+        </section>
+      `;
+    }
+
+    function renderChild(member) {
+      const tasks = state.tasks.filter(task => task.active).map(task => `
+        <button type="button" class="task" data-task-id="${escapeHtml(task.id)}">
+          <span class="task-name">${escapeHtml(task.title)}</span><span class="task-price">+ ${money(task.price)}</span>
+        </button>
+      `).join("");
+      const ownRequests = state.requests.filter(request => request.memberId === member.id).slice().reverse();
+      const approvedRequests = ownRequests.filter(request => request.status === "approved");
+      const recentRequests = ownRequests.filter(request => request.status !== "approved");
+      const requestHistory = recentRequests.length ? recentRequests.map(request => `
+        <article class="request ${request.status === "pending" ? "has-delete" : ""}">
+          <div>
+            <div class="request-title">${escapeHtml(request.taskTitle)}</div>
+            <div class="request-meta">${escapeHtml(request.createdAt)} · ${money(request.price)}</div>
+            ${request.comment ? `<div class="request-comment">${escapeHtml(request.comment)}</div>` : ""}
+            <div class="request-meta status ${request.status}">${request.status === "pending" ? "Ждёт подтверждения" : request.status === "approved" ? "Подтверждено" : "Отклонено"}</div>
+            ${request.parentComment ? `<div class="request-meta">Ответ родителя: ${escapeHtml(request.parentComment)}</div>` : ""}
+          </div>
+          ${request.status === "pending" ? `<button type="button" class="delete-request" data-delete-request="${escapeHtml(request.id)}" aria-label="Удалить отправленное дело" title="Удалить заявку"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg></button>` : ""}
+        </article>
+      `).join("") : `<div class="empty">Нет дел, ожидающих проверки или отклонённых родителем.</div>`;
+      const confirmedHistory = approvedRequests.length ? approvedRequests.map(request => `
+        <article class="request">
+          <div>
+            <div class="request-title">${escapeHtml(request.taskTitle)}</div>
+            <div class="request-meta">${escapeHtml(request.createdAt)} · ${money(request.price)}</div>
+            ${request.comment ? `<div class="request-comment">${escapeHtml(request.comment)}</div>` : ""}
+            <div class="request-meta status approved">Подтверждено</div>
+          </div>
+        </article>
+      `).join("") : `<div class="empty">Подтверждённых дел пока нет.</div>`;
+      const unconfirmedPayment = state.payments.find(payment =>
+        payment.memberId === member.id && payment.status === "awaiting_child_confirmation"
+      );
+      return `
+        <div class="dashboard-head">
+          <div><p class="eyebrow">Привет, ${escapeHtml(member.name)}!</p><h1>Твои дела</h1></div>
+          <button type="button" class="button secondary small" id="switch-profile">Сменить профиль</button>
+        </div>
+        <section class="balance-card">
+          <div>
+            <div class="balance-topline">
+              <div class="balance-label">Твой баланс</div>
+              <button type="button" class="payout-request-button" data-request-payout aria-label="Запросить выплату" title="Запросить выплату" ${availableForPayout(member.id) <= 0 ? "disabled" : ""}>
+                <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 17v3h14v-3"/></svg>
+              </button>
+            </div>
+            <div class="balance-value">${money(memberBalance(member.id))}</div>
+            ${unconfirmedPayment ? `<p class="payout-note">${money(unconfirmedPayment.amount)} · Выплата не подтверждена</p>` : ""}
+            ${state.payments.some(payment => payment.memberId === member.id && payment.status === "requested") ? `<p class="payout-note">Запрос выплаты ожидает родителя</p>` : ""}
+          </div>
+          <div class="balance-icon" aria-hidden="true">🌱</div>
+        </section>
+        <div class="section-heading"><h2>Что ты сделал(а)?</h2><span class="section-note">Одно дело можно отправлять несколько раз</span></div>
+        <div class="task-grid">${tasks || `<div class="empty">Пока нет доступных дел.</div>`}</div>
+        <div class="section-heading"><h2>Мои отметки</h2></div>
+        <div>${requestHistory}</div>
+        <details class="history chores-history" id="chores-history" ${choreHistoryOpen ? "open" : ""}>
+          <summary>История дел <span class="section-note">${approvedRequests.length}</span></summary>
+          <div class="history-content">${confirmedHistory}</div>
+        </details>
+        ${renderPaymentHistory(member.id, false)}
+      `;
+    }
+
+    function renderParent(member) {
+      const pending = state.requests.filter(request => request.status === "pending").slice().reverse();
+      const payoutRequests = state.payments.filter(payment => payment.status === "requested").slice().reverse();
+      const requestsHtml = pending.length ? pending.map(request => `
+        <article class="request">
+          <div>
+            <div class="request-title">${escapeHtml(request.taskTitle)} · ${money(request.price)}</div>
+            <div class="request-meta">${escapeHtml(memberName(request.memberId))} · ${escapeHtml(request.createdAt)}</div>
+            ${request.comment ? `<div class="request-comment">«${escapeHtml(request.comment)}»</div>` : `<div class="request-meta">Комментария нет</div>`}
+          </div>
+          <div class="request-actions">
+            <button type="button" class="button small" data-review="approved" data-request-id="${escapeHtml(request.id)}">Да</button>
+            <button type="button" class="button danger small" data-review="rejected" data-request-id="${escapeHtml(request.id)}">Нет</button>
+          </div>
+        </article>
+      `).join("") : `<div class="empty">Новых заявок пока нет.</div>`;
+      const payoutHtml = payoutRequests.length ? payoutRequests.map(payment => `
+        <article class="request">
+          <div>
+            <div class="request-title">${escapeHtml(memberName(payment.memberId))} · ${money(payment.amount)}</div>
+            <div class="request-meta">${escapeHtml(formatTimestamp(payment.createdAt))}</div>
+            <div class="request-meta status">Запрошена выплата</div>
+          </div>
+          <div class="request-actions">
+            <button type="button" class="button small" data-pay-request="${escapeHtml(payment.id)}">Произвести оплату</button>
+          </div>
+        </article>
+      `).join("") : `<div class="empty">Запросов на выплату пока нет.</div>`;
+      const children = state.members.filter(item => item.role === "child").map(child => `
+        <article class="member-card"><div><strong>${escapeHtml(child.name)}</strong><span class="member-role">Ребёнок</span></div><span class="member-balance">${money(memberBalance(child.id))}</span></article>
+      `).join("") || `<div class="empty">Добавьте профили детей.</div>`;
+      const tasks = state.tasks.map(task => `
+        <article class="member-card">
+          <div><strong>${escapeHtml(task.title)}</strong><span class="member-role">${task.active ? "Доступно" : "Скрыто"}</span></div>
+          <span class="member-balance">${money(task.price)}</span>
+        </article>
+      `).join("");
+      return `
+        <div class="dashboard-head">
+          <div><p class="eyebrow">Родитель · ${escapeHtml(member.name)}</p><h1>Семейная панель</h1></div>
+          <button type="button" class="button secondary small" id="switch-profile">Сменить профиль</button>
+        </div>
+        <div class="section-heading"><h2>Баланс детей</h2></div>
+        <div class="member-list">${children}</div>
+        <div class="section-heading"><h2>Нужно проверить</h2><span class="section-note">${pending.length} заявок</span></div>
+        <div class="request-list">${requestsHtml}</div>
+        <div class="section-heading"><h2>Запросы на выплату</h2><span class="section-note">${payoutRequests.length}</span></div>
+        <div class="request-list">${payoutHtml}</div>
+        ${renderPaymentHistory(member.id, true)}
+        <div class="section-heading"><h2>Список дел</h2></div>
+        <div class="member-list">${tasks}</div>
+        <section class="panel" style="margin-top:14px">
+          <h2>Добавить дело</h2>
+          <form id="task-form">
+            <div class="field"><label for="task-title">Название</label><input id="task-title" name="title" maxlength="60" placeholder="Например, вынести мусор" required></div>
+            <div class="field"><label for="task-price">Цена, ₽</label><input id="task-price" name="price" type="number" min="0.01" max="100000" step="0.01" required></div>
+            <p class="error" id="form-error">${escapeHtml(notice)}</p>
+            <div class="form-actions"><button class="button" type="submit">Добавить дело</button><button class="button secondary" type="button" id="add-member">Добавить участника</button></div>
+          </form>
+        </section>
+      `;
+    }
+
+    function openParentAction(action) {
+      pendingParentAction = action;
+      modal = { type: "parent-pin" };
+      if ("serviceWorker" in navigator && location.protocol !== "file:") {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" }).catch(error => {
+            console.error("Не удалось зарегистрировать service worker.", error);
+          });
+        });
+      }
+
+      render();
+    }
+
+    document.addEventListener("toggle", event => {
+      if (event.target.id === "chores-history") choreHistoryOpen = event.target.open;
+      if (event.target.id === "payment-history") paymentHistoryOpen = event.target.open;
+    }, true);
+
+    document.addEventListener("click", event => {
+      const activeMember = state.members.find(item => item.id === currentMemberId);
+      const paymentConfirmationRequired = activeMember?.role === "child" &&
+        state.payments.some(payment =>
+          payment.memberId === activeMember.id && payment.status === "awaiting_child_confirmation"
+        );
+      if (paymentConfirmationRequired && !event.target.closest("#payment-confirmation-form")) return;
+
+      const roleButton = event.target.closest("[data-role]");
+      if (roleButton) {
+        selectedRole = roleButton.dataset.role;
+        notice = "";
+        render();
+        return;
+      }
+
+      if (event.target.closest("#switch-profile")) {
+        currentMemberId = "";
+        modal = null;
+        choreHistoryOpen = false;
+        paymentHistoryOpen = false;
+        notice = "";
+        render();
+        return;
+      }
+
+      if (event.target.closest("#add-member")) {
+        currentMemberId = "";
+        selectedRole = "";
+        addingMember = true;
+        modal = null;
+        choreHistoryOpen = false;
+        paymentHistoryOpen = false;
+        notice = "";
+        render();
+        return;
+      }
+
+      if (event.target.closest("[data-close-modal]")) {
+        modal = null;
+        pendingParentAction = null;
+        render();
+        return;
+      }
+
+      if (event.target.closest("[data-request-payout]")) {
+        if (availableForPayout(currentMemberId) <= 0) return;
+        modal = { type: "payout-request", error: "" };
+        render();
+        return;
+      }
+
+      const payRequestButton = event.target.closest("[data-pay-request]");
+      if (payRequestButton) {
+        const payment = state.payments.find(item =>
+          item.id === payRequestButton.dataset.payRequest && item.status === "requested"
+        );
+        if (!payment) return;
+        modal = { type: "pay-request", paymentId: payment.id, error: "" };
+        render();
+        return;
+      }
+
+      const deleteRequestButton = event.target.closest("[data-delete-request]");
+      if (deleteRequestButton) {
+        const request = state.requests.find(item =>
+          item.id === deleteRequestButton.dataset.deleteRequest &&
+          item.memberId === currentMemberId &&
+          item.status === "pending"
+        );
+        if (!request) return;
+        modal = { type: "delete-request", requestId: request.id };
+        render();
+        return;
+      }
+
+      const confirmDeleteButton = event.target.closest("[data-confirm-delete]");
+      if (confirmDeleteButton) {
+        const requestIndex = state.requests.findIndex(item =>
+          item.id === confirmDeleteButton.dataset.confirmDelete &&
+          item.memberId === currentMemberId &&
+          item.status === "pending"
+        );
+        if (requestIndex === -1) return;
+        state.requests.splice(requestIndex, 1);
+        saveState();
+        modal = null;
+        render();
+        return;
+      }
+
+      const taskButton = event.target.closest("[data-task-id]");
+      if (taskButton) {
+        const task = state.tasks.find(item => item.id === taskButton.dataset.taskId && item.active);
+        if (!task) return;
+        modal = { type: "task", taskId: task.id };
+        render();
+        return;
+      }
+
+      const reviewButton = event.target.closest("[data-review]");
+      if (reviewButton) {
+        const { review, requestId } = reviewButton.dataset;
+        modal = { type: "review", requestId, status: review };
+        render();
+      }
+    });
+
+    document.addEventListener("submit", event => {
+      const activeMember = state.members.find(item => item.id === currentMemberId);
+      const paymentConfirmationRequired = activeMember?.role === "child" &&
+        state.payments.some(payment =>
+          payment.memberId === activeMember.id && payment.status === "awaiting_child_confirmation"
+        );
+      if (paymentConfirmationRequired && event.target.id !== "payment-confirmation-form") {
+        event.preventDefault();
+        return;
+      }
+
+      if (event.target.id === "setup-form") {
+        event.preventDefault();
+        const name = new FormData(event.target).get("name").trim();
+        const pin = new FormData(event.target).get("pin");
+        if (!selectedRole) {
+          notice = "Сначала выберите роль.";
+          render();
+          return;
+        }
+        if (state.members.filter(member => member.role === selectedRole).length >= 2) {
+          notice = `В семье уже добавлены два участника с ролью «${selectedRole === "parent" ? "родитель" : "ребёнок"}».`;
+          render();
+          return;
+        }
+        if (!name) return;
+        if (selectedRole === "parent" && addingMember && state.pin && pin !== state.pin) {
+          notice = "PIN не подошёл.";
+          render();
+          return;
+        }
+        if (selectedRole === "parent" && !state.pin) {
+          if (!/^\d{4}$/.test(pin)) {
+            notice = "PIN должен состоять ровно из четырёх цифр.";
+            render();
+            return;
+          }
+          state.pin = pin;
+        }
+        addMember(name, selectedRole);
+      }
+
+      if (event.target.id === "login-form") {
+        event.preventDefault();
+        currentMemberId = new FormData(event.target).get("memberId");
+        choreHistoryOpen = false;
+        paymentHistoryOpen = false;
+        notice = "";
+        render();
+      }
+
+      if (event.target.id === "task-form") {
+        event.preventDefault();
+        const form = new FormData(event.target);
+        const title = String(form.get("title")).trim();
+        const price = Number(form.get("price"));
+        if (!title || !Number.isFinite(price) || price <= 0) {
+          notice = "Введите название и положительную цену.";
+          render();
+          return;
+        }
+        openParentAction(() => {
+          state.tasks.push({ id: crypto.randomUUID(), title: title.slice(0, 60), price, active: true });
+          saveState();
+          notice = "Дело добавлено.";
+          render();
+        });
+      }
+
+      if (event.target.id === "request-form") {
+        event.preventDefault();
+        const comment = String(new FormData(event.target).get("comment") || "").trim().slice(0, 500);
+        const task = state.tasks.find(item => item.id === modal?.taskId && item.active);
+        if (!task) {
+          modal = null;
+          render();
+          return;
+        }
+        state.requests.push({
+          id: crypto.randomUUID(),
+          memberId: currentMemberId,
+          taskId: task.id,
+          taskTitle: task.title,
+          price: Number(task.price),
+          comment,
+          createdAt: new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short" }).format(new Date()),
+          status: "pending",
+          parentComment: ""
+        });
+        modal = null;
+        saveState();
+        render();
+      }
+
+      if (event.target.id === "review-form") {
+        event.preventDefault();
+        const form = new FormData(event.target);
+        if (form.get("pin") !== state.pin) {
+          modal.error = "PIN не подошёл. Попробуйте ещё раз.";
+          render();
+          return;
+        }
+        const request = state.requests.find(item => item.id === modal.requestId && item.status === "pending");
+        if (request) {
+          request.status = modal.status;
+          request.parentComment = String(form.get("parentComment") || "").trim().slice(0, 500);
+          saveState();
+        }
+        modal = null;
+        notice = "";
+        render();
+      }
+
+      if (event.target.id === "parent-pin-form") {
+        event.preventDefault();
+        const pin = new FormData(event.target).get("pin");
+        if (pin !== state.pin) {
+          modal.error = "PIN не подошёл. Попробуйте ещё раз.";
+          render();
+          return;
+        }
+        const action = pendingParentAction;
+        pendingParentAction = null;
+        modal = null;
+        if (action) action();
+        render();
+      }
+
+      if (event.target.id === "payout-request-form") {
+        event.preventDefault();
+        const amount = Number(new FormData(event.target).get("amount"));
+        const maximum = availableForPayout(currentMemberId);
+        const amountInCents = Math.round(amount * 100);
+        if (!Number.isFinite(amount) || amountInCents < 1 || amountInCents > Math.round(maximum * 100)) {
+          modal.error = `Введите сумму от 0,01 до ${money(maximum)}.`;
+          render();
+          return;
+        }
+        state.payments.push({
+          id: crypto.randomUUID(),
+          memberId: currentMemberId,
+          amount: amountInCents / 100,
+          status: "requested",
+          createdAt: new Date().toISOString(),
+          paidAt: "",
+          confirmedAt: ""
+        });
+        modal = null;
+        paymentHistoryOpen = false;
+        saveState();
+        render();
+      }
+
+      if (event.target.id === "pay-request-form") {
+        event.preventDefault();
+        const payment = state.payments.find(item =>
+          item.id === modal.paymentId && item.status === "requested"
+        );
+        if (!payment) {
+          modal = null;
+          render();
+          return;
+        }
+        if (new FormData(event.target).get("pin") !== state.pin) {
+          modal.error = "PIN не подошёл. Попробуйте ещё раз.";
+          render();
+          return;
+        }
+        const otherReserved = state.payments
+          .filter(item => item.memberId === payment.memberId && item.status === "requested" && item.id !== payment.id)
+          .reduce((sum, item) => sum + Math.round(Number(item.amount) * 100), 0);
+        const payable = Math.round(memberBalance(payment.memberId) * 100) - otherReserved;
+        if (Math.round(payment.amount * 100) > payable) {
+          modal.error = "На балансе недостаточно средств для этой выплаты.";
+          render();
+          return;
+        }
+        payment.status = "awaiting_child_confirmation";
+        payment.paidAt = new Date().toISOString();
+        modal = null;
+        saveState();
+        render();
+      }
+
+      if (event.target.id === "payment-confirmation-form") {
+        event.preventDefault();
+        const payment = state.payments.find(item =>
+          item.memberId === currentMemberId && item.status === "awaiting_child_confirmation"
+        );
+        if (!payment) return;
+        payment.status = "confirmed";
+        payment.confirmedAt = new Date().toISOString();
+        saveState();
+        render();
+      }
+    });
+
+    function addMember(name, role) {
+      if (state.members.filter(member => member.role === role).length >= 2) {
+        notice = `В семье уже добавлены два участника с ролью «${role === "parent" ? "родитель" : "ребёнок"}».`;
+        render();
+        return;
+      }
+      const member = { id: crypto.randomUUID(), name: name.trim().slice(0, 40), role };
+      state.members.push(member);
+      saveState();
+      currentMemberId = member.id;
+      selectedRole = "";
+      addingMember = false;
+      notice = "";
+      render();
+    }
+
+    render();
+  </script>
+</body>
+</html>
