@@ -303,6 +303,7 @@
       line-height: 1.5;
     }
     .hidden { display: none !important; }
+    #backend-bridge { position: fixed; width: 1px; height: 1px; border: 0; opacity: 0; pointer-events: none; }
 
     @media (max-width: 560px) {
       .shell { width: min(100% - 24px, 920px); padding-top: 17px; }
@@ -326,12 +327,14 @@
       <div class="demo-badge">Прототип · данные пока только на этом устройстве</div>
     </header>
     <main id="app" aria-live="polite"></main>
-  </div>
+    <iframe id="backend-bridge" title="Соединение с семейной базой" aria-hidden="true"></iframe>
+    </div>
 
   <script>
     "use strict";
 
     const STORAGE_KEY = "family-chores-prototype-v1";
+    const BACKEND_URL_KEY = "family-chores-backend-url-v1";
     const DEMO_STATE = {
       pin: null,
       members: [],
@@ -346,6 +349,17 @@
     };
 
     let state = loadState();
+    let backendUrl = localStorage.getItem(BACKEND_URL_KEY) || "";
+    let cloudLoginMode = Boolean(backendUrl);
+    let currentSessionToken = "";
+    let currentRole = "";
+    let currentServerVersion = 0;
+    let cloudSaveQueue = Promise.resolve();
+    let cloudRefreshTimer = 0;
+    let bridgeReady = false;
+    let bridgeFrameUrl = "";
+    let nextRpcId = 0;
+    const pendingRpc = new Map();
     let selectedRole = "";
     let currentMemberId = "";
     let addingMember = false;
@@ -374,8 +388,153 @@
       }
     }
 
-    function saveState() {
+    function verifyParentPin(pin) {
+      if (currentSessionToken) return apiCall("verifyPin", { token: currentSessionToken, pin });
+      return pin === state.pin
+        ? Promise.resolve({ verified: true })
+        : Promise.reject(new Error("PIN не подошёл."));
+    }
+
+    function startCloudRefresh() {
+      window.clearInterval(cloudRefreshTimer);
+      cloudRefreshTimer = window.setInterval(async () => {
+        const token = currentSessionToken;
+        const activeElement = document.activeElement;
+        if (!token || modal || document.querySelector(".modal") || activeElement?.matches("input, textarea, select")) return;
+        try {
+          await cloudSaveQueue;
+          if (currentSessionToken !== token) return;
+          const response = await apiCall("readState", { token });
+          if (currentSessionToken !== token) return;
+          currentServerVersion = response.version;
+          state = { ...response.state, pin: null };
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          render();
+        } catch (error) {
+          console.error("Не удалось обновить данные из Google Таблицы.", error);
+          if (/Сеанс истёк/.test(error.message) && currentSessionToken === token) {
+            currentSessionToken = "";
+            currentRole = "";
+            currentServerVersion = 0;
+            currentMemberId = "";
+            notice = "Сеанс истёк. Войдите в семейный профиль ещё раз.";
+            render();
+          }
+        }
+      }, 15000);
+    }
+
+    function saveState(parentPin = "") {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      if (!currentSessionToken) return Promise.resolve();
+
+      const snapshot = structuredClone(state);
+      const token = currentSessionToken;
+      cloudSaveQueue = cloudSaveQueue.then(async () => {
+        try {
+          const response = await apiCall("syncState", {
+            token,
+            pin: parentPin,
+            version: currentServerVersion,
+            state: snapshot
+          });
+          if (currentSessionToken !== token) return;
+          currentServerVersion = response.version;
+          state = { ...response.state, pin: null };
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          notice = "";
+          render();
+        } catch (error) {
+          console.error("Не удалось сохранить данные в Google Таблицу.", error);
+          if (currentSessionToken === token) {
+            try {
+              const latest = await apiCall("readState", { token });
+              currentServerVersion = latest.version;
+              state = { ...latest.state, pin: null };
+              localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+            } catch (readError) {
+              console.error("Не удалось перечитать данные из Google Таблицы.", readError);
+            }
+            notice = `Не удалось сохранить изменения: ${error.message}`;
+            render();
+          }
+        }
+      });
+      return cloudSaveQueue;
+    }
+
+    function setBackendUrl(value) {
+      const url = new URL(String(value || "").trim());
+      if (url.protocol !== "https:" || url.hostname !== "script.google.com" ||
+          !/^\/macros\/s\/[^/]+\/exec\/?$/.test(url.pathname)) {
+        throw new Error("Введите URL веб-приложения Apps Script, заканчивающийся на /exec.");
+      }
+      backendUrl = url.href;
+      localStorage.setItem(BACKEND_URL_KEY, backendUrl);
+      cloudLoginMode = true;
+      const iframeUrl = `${backendUrl}${backendUrl.includes("?") ? "&" : "?"}bridge=1`;
+      if (bridgeFrameUrl !== iframeUrl) {
+        bridgeReady = false;
+        bridgeFrameUrl = iframeUrl;
+        document.getElementById("backend-bridge").src = iframeUrl;
+      }
+    }
+
+    window.addEventListener("message", event => {
+      const frame = document.getElementById("backend-bridge");
+      if (event.source !== frame.contentWindow) return;
+      const message = event.data;
+      if (message?.type === "family-chores-bridge-ready") {
+        bridgeReady = true;
+        return;
+      }
+      if (!message || typeof message.id !== "string") return;
+      const pending = pendingRpc.get(message.id);
+      if (!pending) return;
+      pendingRpc.delete(message.id);
+      window.clearTimeout(pending.timeout);
+      if (message.ok) pending.resolve(message.result);
+      else pending.reject(new Error(String(message.error || "Ошибка сервера.")));
+    });
+
+    function apiCall(action, payload) {
+      if (!backendUrl) return Promise.reject(new Error("Сначала укажите URL веб-приложения Apps Script."));
+      try {
+        if (!bridgeFrameUrl) setBackendUrl(backendUrl);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return new Promise((resolve, reject) => {
+        const id = `rpc-${Date.now()}-${++nextRpcId}`;
+        const timeout = window.setTimeout(() => {
+          pendingRpc.delete(id);
+          reject(new Error("Нет ответа от Apps Script. Проверьте URL и публикацию веб-приложения."));
+        }, 30000);
+        pendingRpc.set(id, { resolve, reject, timeout });
+        const send = () => {
+          if (!bridgeReady) {
+            pendingRpc.delete(id);
+            window.clearTimeout(timeout);
+            reject(new Error("Соединение с сервером ещё устанавливается. Попробуйте ещё раз."));
+            return;
+          }
+          document.getElementById("backend-bridge").contentWindow.postMessage(
+            { id, action, payload },
+            "*"
+          );
+        };
+        if (bridgeReady) send();
+        else {
+          const poll = window.setInterval(() => {
+            if (!pendingRpc.has(id)) {
+              window.clearInterval(poll);
+            } else if (bridgeReady) {
+              window.clearInterval(poll);
+              send();
+            }
+          }, 100);
+        }
+      });
     }
 
     function escapeHtml(value) {
@@ -451,6 +610,24 @@
 
     function render() {
       const app = document.getElementById("app");
+      document.querySelector(".demo-badge").textContent = currentSessionToken
+        ? "Подключено к семейной Google-таблице"
+        : "Прототип · данные пока только на этом устройстве";
+      if (cloudLoginMode || currentSessionToken) {
+        if (!currentSessionToken) {
+          showPage(app, renderCloudLogin());
+          return;
+        }
+        const cloudMember = state.members.find(member => member.id === currentMemberId);
+        if (!cloudMember) {
+          currentSessionToken = "";
+          currentMemberId = "";
+          showPage(app, renderCloudLogin());
+          return;
+        }
+        showPage(app, cloudMember.role === "parent" ? renderParent(cloudMember) : renderChild(cloudMember));
+        return;
+      }
       if (addingMember || state.members.length === 0) {
         showPage(app, renderSetup());
         return;
@@ -461,6 +638,42 @@
       }
       const member = state.members.find(item => item.id === currentMemberId);
       showPage(app, member.role === "parent" ? renderParent(member) : renderChild(member));
+    }
+
+    function renderCloudLogin() {
+      const parent = selectedRole === "parent";
+      const child = selectedRole === "child";
+      return `
+        <p class="eyebrow">Облачная семейная база</p>
+        <h1>Войдите в семейный профиль</h1>
+        <p class="intro">Данные загрузятся из закрытой Google-таблицы.</p>
+        <section class="panel">
+          <div class="role-grid">
+            <button type="button" class="role-option" data-role="child" aria-pressed="${child}">Ребёнок</button>
+            <button type="button" class="role-option" data-role="parent" aria-pressed="${parent}">Родитель</button>
+          </div>
+          <form id="cloud-login-form">
+            <div class="field">
+              <label for="backend-url">URL веб-приложения Apps Script</label>
+              <input id="backend-url" name="backendUrl" type="url" value="${escapeHtml(backendUrl)}" placeholder="https://script.google.com/macros/s/.../exec" required>
+            </div>
+            <div class="field">
+              <label for="family-code">Семейный код</label>
+              <input id="family-code" name="familyCode" maxlength="40" autocomplete="off" required>
+            </div>
+            ${parent ? `
+              <div class="field"><label for="parent-name">Ваше имя</label><input id="parent-name" name="name" maxlength="40" autocomplete="name" required></div>
+              <div class="field"><label for="parent-pin-login">Четырёхзначный PIN родителей</label><input id="parent-pin-login" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required></div>
+            ` : ""}
+            ${child ? `<div class="field"><label for="child-invite-code">Код профиля ребёнка</label><input id="child-invite-code" name="inviteCode" maxlength="80" autocomplete="off" required></div>` : ""}
+            <p class="error" id="form-error">${escapeHtml(notice || (selectedRole ? "" : "Сначала выберите роль."))}</p>
+            <div class="form-actions"><button class="button" type="submit" ${selectedRole ? "" : "disabled"}>Войти</button></div>
+          </form>
+        </section>
+        <div class="disclaimer">Родительский вход защищён семейным кодом и PIN. Код профиля ребёнка действует как пароль — храните его в семье и не публикуйте.</div>
+        ${!backendUrl ? `<p class="hint">Сервер ещё нужно развернуть в Google Apps Script. Не вводите здесь семейный код, пока вы не настроили его по инструкции.</p>` : ""}
+        <div class="form-actions"><button class="button secondary small" type="button" id="offline-mode">Вернуться к локальному прототипу</button></div>
+      `;
     }
 
     function showPage(app, content) {
@@ -598,6 +811,35 @@
           </div>
         `;
       }
+      if (modal.type === "member") {
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">Добавить участника</h2>
+              <p class="intro">Для ребёнка будет создан личный код входа.</p>
+              <form id="member-form">
+                <div class="field"><label for="new-member-name">Имя</label><input id="new-member-name" name="name" maxlength="40" required></div>
+                <div class="field"><label for="new-member-role">Роль</label><select id="new-member-role" name="role"><option value="child">Ребёнок</option><option value="parent">Родитель</option></select></div>
+                <div class="field"><label for="member-pin">PIN родителей</label><input id="member-pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required></div>
+                <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
+                <div class="form-actions"><button class="button" type="submit">Создать профиль</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
+              </form>
+            </section>
+          </div>
+        `;
+      }
+      if (modal.type === "invite-code") {
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">Профиль создан</h2>
+              <p class="intro">Передайте ребёнку этот код вместе с семейным кодом. Код профиля показывается только сейчас.</p>
+              <p class="payout-amount" id="invite-code-value">${escapeHtml(modal.inviteCode)}</p>
+              <div class="form-actions"><button class="button" type="button" id="copy-invite-code">Скопировать код</button><button class="button secondary" type="button" data-close-modal>Готово</button></div>
+            </section>
+          </div>
+        `;
+      }
       return "";
     }
 
@@ -627,7 +869,8 @@
             <div class="form-actions"><button class="button" type="submit">Продолжить</button></div>
           </form>
         </section>
-        <div class="disclaimer">Это локальный черновик: пока данные сохраняются только в браузере этого устройства. Не используйте здесь настоящий PIN.</div>
+        <div class="disclaimer">Локальный прототип хранит данные только в этом браузере.</div>
+        <div class="form-actions"><button class="button secondary small" type="button" id="cloud-connect">Подключить Google-таблицу</button></div>
       `;
     }
 
@@ -643,7 +886,7 @@
           <form id="login-form">
             <div class="field"><label for="member-select">Профиль</label><select id="member-select" name="memberId">${members}</select></div>
             <p class="error" id="form-error">${escapeHtml(notice)}</p>
-            <div class="form-actions"><button class="button" type="submit">Открыть</button><button class="button secondary" type="button" id="add-member">Добавить участника</button></div>
+            <div class="form-actions"><button class="button" type="submit">Открыть</button><button class="button secondary" type="button" id="add-member">Добавить участника</button><button class="button secondary small" type="button" id="cloud-connect">Подключить Google-таблицу</button></div>
           </form>
         </section>
       `;
@@ -662,7 +905,7 @@
         <article class="request ${request.status === "pending" ? "has-delete" : ""}">
           <div>
             <div class="request-title">${escapeHtml(request.taskTitle)}</div>
-            <div class="request-meta">${escapeHtml(request.createdAt)} · ${money(request.price)}</div>
+            <div class="request-meta">${escapeHtml(formatTimestamp(request.createdAt))} · ${money(request.price)}</div>
             ${request.comment ? `<div class="request-comment">${escapeHtml(request.comment)}</div>` : ""}
             <div class="request-meta status ${request.status}">${request.status === "pending" ? "Ждёт подтверждения" : request.status === "approved" ? "Подтверждено" : "Отклонено"}</div>
             ${request.parentComment ? `<div class="request-meta">Ответ родителя: ${escapeHtml(request.parentComment)}</div>` : ""}
@@ -674,7 +917,7 @@
         <article class="request">
           <div>
             <div class="request-title">${escapeHtml(request.taskTitle)}</div>
-            <div class="request-meta">${escapeHtml(request.createdAt)} · ${money(request.price)}</div>
+            <div class="request-meta">${escapeHtml(formatTimestamp(request.createdAt))} · ${money(request.price)}</div>
             ${request.comment ? `<div class="request-comment">${escapeHtml(request.comment)}</div>` : ""}
             <div class="request-meta status approved">Подтверждено</div>
           </div>
@@ -721,7 +964,7 @@
         <article class="request">
           <div>
             <div class="request-title">${escapeHtml(request.taskTitle)} · ${money(request.price)}</div>
-            <div class="request-meta">${escapeHtml(memberName(request.memberId))} · ${escapeHtml(request.createdAt)}</div>
+            <div class="request-meta">${escapeHtml(memberName(request.memberId))} · ${escapeHtml(formatTimestamp(request.createdAt))}</div>
             ${request.comment ? `<div class="request-comment">«${escapeHtml(request.comment)}»</div>` : `<div class="request-meta">Комментария нет</div>`}
           </div>
           <div class="request-actions">
@@ -780,14 +1023,6 @@
     function openParentAction(action) {
       pendingParentAction = action;
       modal = { type: "parent-pin" };
-      if ("serviceWorker" in navigator && location.protocol !== "file:") {
-        window.addEventListener("load", () => {
-          navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" }).catch(error => {
-            console.error("Не удалось зарегистрировать service worker.", error);
-          });
-        });
-      }
-
       render();
     }
 
@@ -804,6 +1039,26 @@
         );
       if (paymentConfirmationRequired && !event.target.closest("#payment-confirmation-form")) return;
 
+      if (event.target.closest("#cloud-connect")) {
+        cloudLoginMode = true;
+        selectedRole = "";
+        notice = "";
+        render();
+        return;
+      }
+
+      if (event.target.closest("#offline-mode")) {
+        window.clearInterval(cloudRefreshTimer);
+        cloudLoginMode = false;
+        currentSessionToken = "";
+        currentMemberId = "";
+        currentRole = "";
+        currentServerVersion = 0;
+        notice = "";
+        render();
+        return;
+      }
+
       const roleButton = event.target.closest("[data-role]");
       if (roleButton) {
         selectedRole = roleButton.dataset.role;
@@ -813,6 +1068,9 @@
       }
 
       if (event.target.closest("#switch-profile")) {
+        window.clearInterval(cloudRefreshTimer);
+        currentSessionToken = "";
+        currentRole = "";
         currentMemberId = "";
         modal = null;
         choreHistoryOpen = false;
@@ -823,6 +1081,11 @@
       }
 
       if (event.target.closest("#add-member")) {
+        if (currentSessionToken && currentRole === "parent") {
+          modal = { type: "member", error: "" };
+          render();
+          return;
+        }
         currentMemberId = "";
         selectedRole = "";
         addingMember = true;
@@ -831,6 +1094,18 @@
         paymentHistoryOpen = false;
         notice = "";
         render();
+        return;
+      }
+
+      if (event.target.closest("#copy-invite-code")) {
+        const code = modal?.inviteCode;
+        if (!code) return;
+        navigator.clipboard.writeText(code).then(() => {
+          notice = "Код скопирован.";
+        }).catch(error => {
+          console.error("Не удалось скопировать код.", error);
+          notice = "Не удалось скопировать автоматически. Перепишите код вручную.";
+        });
         return;
       }
 
@@ -946,6 +1221,73 @@
         addMember(name, selectedRole);
       }
 
+      if (event.target.id === "cloud-login-form") {
+        event.preventDefault();
+        const form = new FormData(event.target);
+        const name = String(form.get("name") || "").trim();
+        const familyCode = String(form.get("familyCode") || "").trim();
+        const pin = String(form.get("pin") || "");
+        const inviteCode = String(form.get("inviteCode") || "").trim();
+        if (!selectedRole) {
+          notice = "Сначала выберите роль.";
+          render();
+          return;
+        }
+        try {
+          setBackendUrl(form.get("backendUrl"));
+        } catch (error) {
+          notice = error.message;
+          render();
+          return;
+        }
+        notice = "Подключаемся к семейной базе…";
+        render();
+        apiCall(selectedRole === "parent" ? "parentLogin" : "childLogin", {
+          familyCode,
+          name,
+          pin,
+          inviteCode
+        }).then(response => {
+          currentSessionToken = response.token;
+          currentMemberId = response.memberId;
+          currentRole = response.role;
+          currentServerVersion = response.version;
+          state = { ...response.state, pin: null };
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          startCloudRefresh();
+          choreHistoryOpen = false;
+          paymentHistoryOpen = false;
+          notice = "";
+          render();
+        }).catch(error => {
+          console.error("Не удалось войти в семейную Google-таблицу.", error);
+          notice = error.message;
+          render();
+        });
+      }
+
+      if (event.target.id === "member-form") {
+        event.preventDefault();
+        const form = new FormData(event.target);
+        const name = String(form.get("name") || "").trim();
+        const role = String(form.get("role") || "");
+        const pin = String(form.get("pin") || "");
+        apiCall("addMember", { token: currentSessionToken, name, role, pin }).then(response => {
+          state = { ...response.state, pin: null };
+          currentServerVersion = response.version;
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          modal = response.inviteCode
+            ? { type: "invite-code", inviteCode: response.inviteCode }
+            : null;
+          notice = "";
+          render();
+        }).catch(error => {
+          console.error("Не удалось добавить участника.", error);
+          if (modal) modal.error = error.message;
+          render();
+        });
+      }
+
       if (event.target.id === "login-form") {
         event.preventDefault();
         currentMemberId = new FormData(event.target).get("memberId");
@@ -965,9 +1307,9 @@
           render();
           return;
         }
-        openParentAction(() => {
+        openParentAction(pin => {
           state.tasks.push({ id: crypto.randomUUID(), title: title.slice(0, 60), price, active: true });
-          saveState();
+          saveState(currentSessionToken ? pin : "");
           notice = "Дело добавлено.";
           render();
         });
@@ -989,7 +1331,7 @@
           taskTitle: task.title,
           price: Number(task.price),
           comment,
-          createdAt: new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short" }).format(new Date()),
+          createdAt: new Date().toISOString(),
           status: "pending",
           parentComment: ""
         });
@@ -1001,35 +1343,36 @@
       if (event.target.id === "review-form") {
         event.preventDefault();
         const form = new FormData(event.target);
-        if (form.get("pin") !== state.pin) {
-          modal.error = "PIN не подошёл. Попробуйте ещё раз.";
+        const pin = String(form.get("pin") || "");
+        verifyParentPin(pin).then(() => {
+          const request = state.requests.find(item => item.id === modal.requestId && item.status === "pending");
+          if (request) {
+            request.status = modal.status;
+            request.parentComment = String(form.get("parentComment") || "").trim().slice(0, 500);
+            saveState(currentSessionToken ? pin : "");
+          }
+          modal = null;
+          notice = "";
           render();
-          return;
-        }
-        const request = state.requests.find(item => item.id === modal.requestId && item.status === "pending");
-        if (request) {
-          request.status = modal.status;
-          request.parentComment = String(form.get("parentComment") || "").trim().slice(0, 500);
-          saveState();
-        }
-        modal = null;
-        notice = "";
-        render();
+        }).catch(error => {
+          if (modal) modal.error = error.message;
+          render();
+        });
       }
 
       if (event.target.id === "parent-pin-form") {
         event.preventDefault();
         const pin = new FormData(event.target).get("pin");
-        if (pin !== state.pin) {
-          modal.error = "PIN не подошёл. Попробуйте ещё раз.";
-          render();
-          return;
-        }
         const action = pendingParentAction;
-        pendingParentAction = null;
-        modal = null;
-        if (action) action();
-        render();
+        verifyParentPin(pin).then(() => {
+          pendingParentAction = null;
+          modal = null;
+          if (action) action(pin);
+          render();
+        }).catch(error => {
+          modal.error = `${error.message} Попробуйте ещё раз.`;
+          render();
+        });
       }
 
       if (event.target.id === "payout-request-form") {
@@ -1059,16 +1402,12 @@
 
       if (event.target.id === "pay-request-form") {
         event.preventDefault();
+        const form = new FormData(event.target);
         const payment = state.payments.find(item =>
           item.id === modal.paymentId && item.status === "requested"
         );
         if (!payment) {
           modal = null;
-          render();
-          return;
-        }
-        if (new FormData(event.target).get("pin") !== state.pin) {
-          modal.error = "PIN не подошёл. Попробуйте ещё раз.";
           render();
           return;
         }
@@ -1081,11 +1420,17 @@
           render();
           return;
         }
-        payment.status = "awaiting_child_confirmation";
-        payment.paidAt = new Date().toISOString();
-        modal = null;
-        saveState();
-        render();
+        const pin = String(form.get("pin") || "");
+        verifyParentPin(pin).then(() => {
+          payment.status = "awaiting_child_confirmation";
+          payment.paidAt = new Date().toISOString();
+          modal = null;
+          saveState(currentSessionToken ? pin : "");
+          render();
+        }).catch(error => {
+          if (modal) modal.error = error.message;
+          render();
+        });
       }
 
       if (event.target.id === "payment-confirmation-form") {
@@ -1115,6 +1460,14 @@
       addingMember = false;
       notice = "";
       render();
+    }
+
+    if ("serviceWorker" in navigator && location.protocol !== "file:") {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" }).catch(error => {
+          console.error("Не удалось зарегистрировать service worker.", error);
+        });
+      });
     }
 
     render();
