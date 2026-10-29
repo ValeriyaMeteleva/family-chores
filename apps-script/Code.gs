@@ -1,8 +1,10 @@
 const SHEETS = {
   members: { name: "Участники", headers: ["id", "name", "role", "inviteHash"] },
-  tasks: { name: "Дела", headers: ["id", "title", "price", "active"] },
+  tasks: { name: "Дела", headers: ["id", "title", "price", "active", "visibleTo"] },
   requests: { name: "Заявки", headers: ["id", "memberId", "taskId", "taskTitle", "price", "comment", "createdAt", "status", "parentComment"] },
-  payments: { name: "Выплаты", headers: ["id", "memberId", "amount", "status", "createdAt", "paidAt", "confirmedAt"] }
+  payments: { name: "Выплаты", headers: ["id", "memberId", "amount", "status", "createdAt", "paidAt", "confirmedAt"] },
+  funds: { name: "Финансы", headers: ["memberId", "debtTarget", "debtRemaining", "debtPaidTotal", "debtRate", "savingsTarget", "savingsRate", "savingsBalance", "savingsTotal", "savingsWithdrawn"] },
+  savingsRequests: { name: "Запросы накоплений", headers: ["id", "memberId", "amount", "status", "createdAt", "paidAt", "confirmedAt"] }
 };
 
 const PROPERTY_KEYS = {
@@ -105,6 +107,8 @@ function apiDispatch(action, payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("Некорректный запрос.");
   }
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  Object.keys(SHEETS).forEach(key => ensureSheet_(spreadsheet, SHEETS[key]));
   switch (action) {
     case "parentLogin": return parentLogin_(payload);
     case "childLogin": return childLogin_(payload);
@@ -158,6 +162,7 @@ function parentLogin_(payload) {
       }
       member = { id: randomToken_(), name: name, role: "parent", inviteHash: "" };
       appendObject_(SHEETS.members, member);
+      appendFund_(member.id);
       bumpRevision_();
     }
     return createSession_(member);
@@ -226,6 +231,7 @@ function addMember_(payload) {
       inviteHash: role === "child" ? digest_(inviteCode, inviteHashSalt) : ""
     };
     appendObject_(SHEETS.members, member);
+    appendFund_(member.id);
     const version = bumpRevision_();
     return {
       member: { id: member.id, name: member.name, role: member.role },
@@ -245,7 +251,7 @@ function syncState_(payload) {
   }
   const candidate = payload.state;
   if (!candidate || typeof candidate !== "object") throw new Error("Нет данных для сохранения.");
-  ["members", "tasks", "requests", "payments"].forEach(key => {
+  ["members", "tasks", "requests", "payments", "funds", "savingsRequests"].forEach(key => {
     if (!Array.isArray(candidate[key]) || candidate[key].length > 10000) {
       throw new Error("Некорректный формат данных.");
     }
@@ -260,11 +266,16 @@ function syncState_(payload) {
     const current = readStateData_();
     if (session.role === "parent") {
       validateParentState_(current, candidate);
+      applyApprovedChoreAllocations_(current, candidate);
+      validateFundTotals_(candidate);
       writeState_(candidate);
     } else {
       const currentForChild = stateForMember_(current, session);
       validateChildState_(currentForChild, candidate, session.memberId);
-      writeState_(mergeChildState_(current, candidate, session.memberId));
+      const merged = mergeChildState_(current, candidate, session.memberId);
+      applySavingsConfirmations_(current, merged);
+      validateFundTotals_(merged);
+      writeState_(merged);
     }
     const version = bumpRevision_();
     return {
@@ -280,7 +291,10 @@ function syncState_(payload) {
 
 function validateParentState_(current, next) {
   if (new Set(next.members.map(item => item.id)).size !== next.members.length ||
-      new Set(next.tasks.map(item => item.id)).size !== next.tasks.length) {
+      new Set(next.tasks.map(item => item.id)).size !== next.tasks.length ||
+      new Set(next.requests.map(item => item.id)).size !== next.requests.length ||
+      new Set(next.payments.map(item => item.id)).size !== next.payments.length ||
+      new Set(next.savingsRequests.map(item => item.id)).size !== next.savingsRequests.length) {
     throw new Error("В данных повторяются идентификаторы.");
   }
   if (next.requests.some(request => typeof request.parentComment !== "string" || request.parentComment.length > 500)) {
@@ -289,6 +303,9 @@ function validateParentState_(current, next) {
   if (!sameJson_(current.members, next.members)) throw new Error("Изменение профилей доступно только через добавление участника.");
   validateRows_(current.requests, next.requests, item => item.status === "pending", ["status", "parentComment"], "заявки");
   validateRows_(current.payments, next.payments, item => item.status === "requested", ["status", "paidAt"], "выплаты");
+  validateRows_(current.savingsRequests, next.savingsRequests, item => item.status === "requested",
+    ["status", "paidAt"], "запросы накоплений");
+  validateParentFunds_(current.funds, next.funds);
 
   const existingTasks = new Map(current.tasks.map(task => [task.id, task]));
   const nextTaskIds = new Set();
@@ -299,6 +316,9 @@ function validateParentState_(current, next) {
     const previous = existingTasks.get(task.id);
     if (previous) {
       if (Number(task.price) < 0 || !task.title) throw new Error("Некорректные данные дела.");
+    }
+    if (task.visibleTo && !current.members.some(member => member.id === task.visibleTo && member.role === "child")) {
+      throw new Error("Для дела выбран неизвестный профиль ребёнка.");
     }
   });
   if (current.tasks.some(task => !nextTaskIds.has(task.id))) {
@@ -319,6 +339,14 @@ function validateParentState_(current, next) {
       throw new Error("Недопустимый статус выплаты.");
     }
   });
+  current.savingsRequests.forEach(request => {
+    const candidate = next.savingsRequests.find(item => item.id === request.id);
+    if (request.status === "requested" && candidate &&
+        candidate.status !== "requested" && candidate.status !== "awaiting_child_confirmation" &&
+        candidate.status !== "rejected") {
+      throw new Error("Недопустимый статус запроса накоплений.");
+    }
+  });
 
   const earnedByMember = new Map();
   next.requests.filter(request => request.status === "approved").forEach(request => {
@@ -336,9 +364,15 @@ function validateParentState_(current, next) {
         (paidByMember.get(payment.memberId) || 0) + cents_(payment.amount)
       );
     });
-  paidByMember.forEach((paid, memberId) => {
-    if (paid > (earnedByMember.get(memberId) || 0)) {
-      throw new Error("Сумма выплаты превышает подтверждённый баланс ребёнка.");
+  const reservedByMember = new Map();
+  next.payments.filter(payment => payment.status === "requested").forEach(payment => {
+    reservedByMember.set(payment.memberId, (reservedByMember.get(payment.memberId) || 0) + cents_(payment.amount));
+  });
+  next.funds.forEach(fund => {
+    const paid = paidByMember.get(fund.memberId) || 0;
+    if (paid + (reservedByMember.get(fund.memberId) || 0) + cents_(fund.debtPaidTotal) +
+        cents_(fund.savingsTotal) > (earnedByMember.get(fund.memberId) || 0)) {
+      throw new Error("Выплаты и накопления превышают заработанную сумму.");
     }
   });
 }
@@ -348,9 +382,11 @@ function validateChildState_(current, next, memberId) {
     throw new Error("Детский профиль не может редактировать участников и список дел.");
   }
   if (new Set(next.requests.map(item => item.id)).size !== next.requests.length ||
-      new Set(next.payments.map(item => item.id)).size !== next.payments.length) {
+      new Set(next.payments.map(item => item.id)).size !== next.payments.length ||
+      new Set(next.savingsRequests.map(item => item.id)).size !== next.savingsRequests.length) {
     throw new Error("В данных повторяются идентификаторы.");
   }
+  validateChildFunds_(current.funds, next.funds, memberId);
 
   const oldRequests = new Map(current.requests.map(request => [request.id, request]));
   const nextRequests = new Map(next.requests.map(request => [request.id, request]));
@@ -386,14 +422,55 @@ function validateChildState_(current, next, memberId) {
         candidate.status === "confirmed" &&
         candidate.memberId === payment.memberId &&
         Number(candidate.amount) === Number(payment.amount) &&
-        candidate.paidAt === payment.paidAt;
+        candidate.paidAt === payment.paidAt &&
+        typeof candidate.confirmedAt === "string" && candidate.confirmedAt.length <= 80 &&
+        sameExceptFields_(payment, candidate, ["status", "confirmedAt"]);
       if (!confirming) throw new Error("Некорректное изменение выплаты.");
+    }
+  });
+  const oldSavingsRequests = new Map(current.savingsRequests.map(item => [item.id, item]));
+  const nextSavingsRequests = new Map(next.savingsRequests.map(item => [item.id, item]));
+  current.savingsRequests.forEach(request => {
+    const candidate = nextSavingsRequests.get(request.id);
+    if (!candidate) throw new Error("Удалять историю запросов накоплений нельзя.");
+    if (!sameJson_(request, candidate)) {
+      const confirming = request.memberId === memberId &&
+        request.status === "awaiting_child_confirmation" &&
+        candidate.status === "confirmed" &&
+        candidate.memberId === request.memberId &&
+        Number(candidate.amount) === Number(request.amount) &&
+        candidate.paidAt === request.paidAt &&
+        typeof candidate.confirmedAt === "string" && candidate.confirmedAt.length <= 80 &&
+        sameExceptFields_(request, candidate, ["status", "confirmedAt"]);
+      if (!confirming) throw new Error("Некорректное изменение запроса накоплений.");
+    }
+  });
+  const fund = next.funds.find(item => item.memberId === memberId) || emptyFund_(memberId);
+  const reservedSavings = next.savingsRequests
+    .filter(item => item.memberId === memberId &&
+      (item.status === "requested" || item.status === "awaiting_child_confirmation"))
+    .reduce((sum, item) => sum + cents_(item.amount), 0);
+  next.savingsRequests.forEach(request => {
+    if (oldSavingsRequests.has(request.id)) return;
+    const amount = cents_(request.amount);
+    if (request.memberId !== memberId || request.status !== "requested" || amount <= 0 ||
+        amount > cents_(fund.savingsBalance) - reservedSavings ||
+        typeof request.id !== "string" || !request.id || request.id.length > 120 ||
+        typeof request.createdAt !== "string" || request.createdAt.length > 80 ||
+        request.paidAt !== "" || request.confirmedAt !== "") {
+      throw new Error("Запрос превышает сумму доступных накоплений.");
     }
   });
 
   let earnedCents = current.requests
     .filter(request => request.memberId === memberId && request.status === "approved")
     .reduce((sum, request) => sum + cents_(request.price), 0);
+  const currentFund = current.funds.find(item => item.memberId === memberId) || emptyFund_(memberId);
+  earnedCents -= cents_(currentFund.debtPaidTotal) + cents_(currentFund.savingsTotal);
+  earnedCents -= current.payments
+    .filter(payment => payment.memberId === memberId &&
+      (payment.status === "awaiting_child_confirmation" || payment.status === "confirmed"))
+    .reduce((sum, payment) => sum + cents_(payment.amount), 0);
   let reservedCents = current.payments
     .filter(payment => payment.memberId === memberId && payment.status === "requested")
     .reduce((sum, payment) => sum + cents_(payment.amount), 0);
@@ -406,6 +483,147 @@ function validateChildState_(current, next, memberId) {
       throw new Error("Сумма выплаты превышает доступный баланс.");
     }
     reservedCents += amountCents;
+  });
+}
+
+function sameExceptFields_(current, candidate, allowedFields) {
+  const keys = new Set(Object.keys(current).concat(Object.keys(candidate)));
+  return Array.from(keys).every(key =>
+    allowedFields.includes(key) || current[key] === candidate[key]
+  ) && Object.keys(candidate).every(key =>
+    Object.prototype.hasOwnProperty.call(current, key) || allowedFields.includes(key)
+  );
+}
+
+function validateParentFunds_(currentFunds, nextFunds) {
+  if (currentFunds.length !== nextFunds.length) throw new Error("Список финансовых счетов изменён.");
+  currentFunds.forEach(current => {
+    const next = nextFunds.find(item => item.memberId === current.memberId);
+    if (!next) throw new Error("Финансовый счёт участника не найден.");
+    validateFundShape_(next);
+    ["debtPaidTotal", "debtRate", "savingsTarget", "savingsRate", "savingsBalance",
+      "savingsTotal", "savingsWithdrawn"].forEach(key => {
+      if (cents_(current[key]) !== cents_(next[key])) throw new Error("Изменить можно только остаток долга.");
+    });
+    const remaining = cents_(next.debtRemaining);
+    const target = cents_(next.debtTarget);
+    if (remaining < 0 || target < 0 ||
+        (remaining > 0 && target !== remaining + cents_(next.debtPaidTotal)) ||
+        (remaining === 0 && target !== 0 && target !== cents_(next.debtPaidTotal))) {
+      throw new Error("Некорректная сумма долга.");
+    }
+  });
+}
+
+function validateChildFunds_(currentFunds, nextFunds, memberId) {
+  if (currentFunds.length !== 1 || nextFunds.length !== 1 ||
+      currentFunds[0].memberId !== memberId || nextFunds[0].memberId !== memberId) {
+    throw new Error("Изменён финансовый счёт другого участника.");
+  }
+  const current = currentFunds[0];
+  const next = nextFunds[0];
+  validateFundShape_(next);
+  ["debtPaidTotal", "savingsBalance", "savingsTotal", "savingsWithdrawn"].forEach(key => {
+    if (cents_(current[key]) !== cents_(next[key])) {
+      throw new Error("Нельзя менять уже накопленные суммы или списывать долг.");
+    }
+  });
+  ["debtRate", "savingsTarget", "savingsRate"].forEach(key => {
+    if (!Number.isFinite(Number(next[key]))) throw new Error("Некорректные настройки накоплений.");
+  });
+  if (Number(next.savingsTarget) < 0 || Number(next.savingsTarget) > 100000 ||
+      Number(next.savingsRate) < 0 || Number(next.savingsRate) > 50 ||
+      Number(next.debtRate) < 0 || Number(next.debtRate) > 50 ||
+      Number(next.savingsTarget) < Number(next.savingsBalance)) {
+    throw new Error("Некорректная сумма или процент накоплений.");
+  }
+  if (Number(next.debtRemaining) > 0 && Number(next.savingsRate) > 20) {
+    throw new Error("При активном долге на накопления можно направлять не более 20% остатка.");
+  }
+  if (Number(current.debtRemaining) > 0) {
+    if (cents_(current.debtRemaining) !== cents_(next.debtRemaining) ||
+        cents_(current.debtTarget) !== cents_(next.debtTarget) ||
+        cents_(current.debtRate) !== cents_(next.debtRate)) {
+      throw new Error("Изменить или отменить долг может только родитель.");
+    }
+  } else {
+    const remaining = cents_(next.debtRemaining);
+    const target = cents_(next.debtTarget);
+    if (remaining < 0 || remaining > 10000000 ||
+        (remaining > 0 && target !== remaining + cents_(next.debtPaidTotal)) ||
+        (remaining === 0 && target !== cents_(current.debtTarget))) {
+      throw new Error("Некорректная сумма долга.");
+    }
+  }
+}
+
+function validateFundShape_(fund) {
+  const amounts = ["debtTarget", "debtRemaining", "debtPaidTotal", "savingsTarget",
+    "savingsBalance", "savingsTotal", "savingsWithdrawn"];
+  const rates = ["debtRate", "savingsRate"];
+  if (!fund || typeof fund.memberId !== "string" || !fund.memberId ||
+      amounts.some(key => !Number.isFinite(Number(fund[key])) || Number(fund[key]) < 0) ||
+      rates.some(key => !Number.isFinite(Number(fund[key])) || Number(fund[key]) < 0 || Number(fund[key]) > 50) ||
+      Number(fund.debtRemaining) > 100000 || Number(fund.savingsTarget) > 100000 ||
+      (Number(fund.debtRemaining) > 0 && Number(fund.savingsRate) > 20)) {
+    throw new Error("Некорректные данные финансового счёта.");
+  }
+}
+
+function applyApprovedChoreAllocations_(current, next) {
+  const previous = new Map(current.requests.map(request => [request.id, request]));
+  next.requests.forEach(request => {
+    const old = previous.get(request.id);
+    if (!old || old.status !== "pending" || request.status !== "approved") return;
+    const fund = next.funds.find(item => item.memberId === request.memberId);
+    if (!fund) throw new Error("Не найден финансовый счёт ребёнка.");
+    const earned = cents_(request.price);
+    const debtPart = Math.min(cents_(fund.debtRemaining), Math.round(earned * Number(fund.debtRate) / 100));
+    const afterDebt = earned - debtPart;
+    const savingsPart = Number(fund.savingsTarget) > Number(fund.savingsBalance)
+      ? Math.min(
+        cents_(fund.savingsTarget) - cents_(fund.savingsBalance),
+        Math.round(afterDebt * Number(fund.savingsRate) / 100)
+      )
+      : 0;
+    fund.debtRemaining = (cents_(fund.debtRemaining) - debtPart) / 100;
+    fund.debtPaidTotal = (cents_(fund.debtPaidTotal) + debtPart) / 100;
+    fund.savingsBalance = (cents_(fund.savingsBalance) + savingsPart) / 100;
+    fund.savingsTotal = (cents_(fund.savingsTotal) + savingsPart) / 100;
+    if (fund.debtRemaining === 0) fund.debtTarget = fund.debtPaidTotal;
+  });
+}
+
+function applySavingsConfirmations_(current, next) {
+  const previous = new Map(current.savingsRequests.map(request => [request.id, request]));
+  next.savingsRequests.forEach(request => {
+    const old = previous.get(request.id);
+    if (!old || old.status !== "awaiting_child_confirmation" || request.status !== "confirmed") return;
+    const fund = next.funds.find(item => item.memberId === request.memberId);
+    if (!fund || cents_(request.amount) > cents_(fund.savingsBalance)) {
+      throw new Error("Недостаточно средств в накоплениях для подтверждения выплаты.");
+    }
+    fund.savingsBalance = (cents_(fund.savingsBalance) - cents_(request.amount)) / 100;
+    fund.savingsWithdrawn = (cents_(fund.savingsWithdrawn) + cents_(request.amount)) / 100;
+  });
+}
+
+function validateFundTotals_(state) {
+  const earned = new Map();
+  state.requests.filter(request => request.status === "approved").forEach(request => {
+    earned.set(request.memberId, (earned.get(request.memberId) || 0) + cents_(request.price));
+  });
+  state.funds.forEach(fund => {
+    validateFundShape_(fund);
+    const debtPaid = cents_(fund.debtPaidTotal);
+    const savingsTotal = cents_(fund.savingsTotal);
+    const savingsBalance = cents_(fund.savingsBalance);
+    const savingsWithdrawn = cents_(fund.savingsWithdrawn);
+    if (debtPaid < 0 || savingsTotal < 0 || savingsBalance < 0 ||
+        savingsWithdrawn < 0 || savingsBalance + savingsWithdrawn !== savingsTotal ||
+        debtPaid + savingsTotal > (earned.get(fund.memberId) || 0)) {
+      throw new Error("Финансовые суммы превышают заработок ребёнка.");
+    }
   });
 }
 
@@ -430,24 +648,30 @@ function validateRows_(currentRows, nextRows, canUpdate, updateFields, label) {
 function validateTask_(task) {
   if (!task || typeof task.id !== "string" || !task.id || typeof task.title !== "string" ||
       task.title.trim().length < 1 || task.title.length > 60 || !Number.isFinite(Number(task.price)) ||
-      Number(task.price) <= 0 || Number(task.price) > 100000 || typeof task.active !== "boolean") {
+      Number(task.price) <= 0 || Number(task.price) > 100000 || typeof task.active !== "boolean" ||
+      (task.visibleTo !== undefined && typeof task.visibleTo !== "string")) {
     throw new Error("Некорректные данные дела.");
   }
 }
 
 function writeState_(state) {
-  replaceRows_(SHEETS.tasks, state.tasks, ["id", "title", "price", "active"]);
+  replaceRows_(SHEETS.tasks, state.tasks, ["id", "title", "price", "active", "visibleTo"]);
   replaceRows_(SHEETS.requests, state.requests, SHEETS.requests.headers);
   replaceRows_(SHEETS.payments, state.payments, SHEETS.payments.headers);
+  replaceRows_(SHEETS.funds, state.funds, SHEETS.funds.headers);
+  replaceRows_(SHEETS.savingsRequests, state.savingsRequests, SHEETS.savingsRequests.headers);
 }
 
 function readStateData_() {
+  const memberRows = readRows_(SHEETS.members);
+  const storedFunds = readRows_(SHEETS.funds);
   return {
-    members: readRows_(SHEETS.members).map(member => ({
+    members: memberRows.map(member => ({
       id: member.id, name: member.name, role: member.role
     })),
     tasks: readRows_(SHEETS.tasks).map(task => ({
-      id: task.id, title: task.title, price: Number(task.price), active: task.active === true || task.active === "TRUE"
+      id: task.id, title: task.title, price: Number(task.price),
+      active: task.active === true || task.active === "TRUE", visibleTo: task.visibleTo || ""
     })),
     requests: readRows_(SHEETS.requests).map(request => ({
       id: request.id, memberId: request.memberId, taskId: request.taskId,
@@ -458,6 +682,14 @@ function readStateData_() {
       id: payment.id, memberId: payment.memberId, amount: Number(payment.amount),
       status: payment.status, createdAt: payment.createdAt, paidAt: payment.paidAt,
       confirmedAt: payment.confirmedAt
+    })),
+    funds: memberRows.map(member =>
+      storedFunds.find(fund => fund.memberId === member.id) || emptyFund_(member.id)
+    ),
+    savingsRequests: readRows_(SHEETS.savingsRequests).map(request => ({
+      id: request.id, memberId: request.memberId, amount: Number(request.amount),
+      status: request.status, createdAt: request.createdAt, paidAt: request.paidAt,
+      confirmedAt: request.confirmedAt
     }))
   };
 }
@@ -466,9 +698,11 @@ function stateForMember_(state, session) {
   if (session.role === "parent") return state;
   return {
     members: state.members.filter(member => member.id === session.memberId),
-    tasks: state.tasks,
+    tasks: state.tasks.filter(task => !task.visibleTo || task.visibleTo === session.memberId),
     requests: state.requests.filter(request => request.memberId === session.memberId),
-    payments: state.payments.filter(payment => payment.memberId === session.memberId)
+    payments: state.payments.filter(payment => payment.memberId === session.memberId),
+    funds: state.funds.filter(fund => fund.memberId === session.memberId),
+    savingsRequests: state.savingsRequests.filter(request => request.memberId === session.memberId)
   };
 }
 
@@ -481,7 +715,13 @@ function mergeChildState_(current, childState, memberId) {
       .concat(childState.requests),
     payments: current.payments
       .filter(payment => payment.memberId !== memberId)
-      .concat(childState.payments)
+      .concat(childState.payments),
+    funds: current.funds
+      .filter(fund => fund.memberId !== memberId)
+      .concat(childState.funds),
+    savingsRequests: current.savingsRequests
+      .filter(request => request.memberId !== memberId)
+      .concat(childState.savingsRequests)
   };
 }
 
@@ -489,8 +729,14 @@ function ensureSheet_(spreadsheet, schema) {
   let sheet = spreadsheet.getSheetByName(schema.name);
   if (!sheet) sheet = spreadsheet.insertSheet(schema.name);
   if (sheet.getLastRow() === 0) sheet.appendRow(schema.headers);
-  const headers = sheet.getRange(1, 1, 1, schema.headers.length).getValues()[0];
-  if (!sameJson_(headers, schema.headers)) throw new Error(`Вкладка «${schema.name}» уже существует с другой структурой.`);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const isPrefix = headers.length <= schema.headers.length &&
+    headers.every((header, index) => header === schema.headers[index]);
+  if (!isPrefix) throw new Error(`Вкладка «${schema.name}» уже существует с другой структурой.`);
+  if (headers.length < schema.headers.length) {
+    sheet.getRange(1, headers.length + 1, 1, schema.headers.length - headers.length)
+      .setValues([schema.headers.slice(headers.length)]);
+  }
   return sheet;
 }
 
@@ -526,6 +772,30 @@ function appendObject_(schema, object) {
     }
     salts.appendRow([object.id, object.inviteHashSalt, new Date().toISOString()]);
   }
+}
+
+function appendFund_(memberId) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEETS.funds.name);
+  if (!sheet) throw new Error("Не найдена вкладка «Финансы».");
+  sheet.appendRow(SHEETS.funds.headers.map(key => {
+    const fund = emptyFund_(memberId);
+    return fund[key] === undefined ? "" : fund[key];
+  }));
+}
+
+function emptyFund_(memberId) {
+  return {
+    memberId: memberId,
+    debtTarget: 0,
+    debtRemaining: 0,
+    debtPaidTotal: 0,
+    debtRate: 50,
+    savingsTarget: 0,
+    savingsRate: 0,
+    savingsBalance: 0,
+    savingsTotal: 0,
+    savingsWithdrawn: 0
+  };
 }
 
 function replaceRows_(schema, objects, columns) {
