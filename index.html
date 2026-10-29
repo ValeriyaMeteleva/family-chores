@@ -584,6 +584,9 @@
       const message = event.data;
       if (message?.type === "family-chores-bridge-ready") {
         bridgeReady = true;
+        pendingRpc.forEach(pending => {
+          pending.bridgeResponded = true;
+        });
         return;
       }
       if (!message || typeof message.id !== "string") return;
@@ -591,6 +594,7 @@
       if (!pending) return;
       pendingRpc.delete(message.id);
       window.clearTimeout(pending.timeout);
+      window.clearInterval(pending.poll);
       if (message.ok) pending.resolve(message.result);
       else pending.reject(new Error(String(message.error || "Ошибка сервера.")));
     });
@@ -605,29 +609,36 @@
       return new Promise((resolve, reject) => {
         const id = `rpc-${Date.now()}-${++nextRpcId}`;
         const timeout = window.setTimeout(() => {
+          const pending = pendingRpc.get(id);
+          if (pending) window.clearInterval(pending.poll);
           pendingRpc.delete(id);
-          reject(new Error("Нет ответа от Apps Script. Проверьте URL и публикацию веб-приложения."));
+          reject(new Error(pending?.bridgeResponded
+            ? "Мост ответил, но Apps Script не завершил запрос. Проверьте Code.gs и доступ к таблице."
+            : "Мост Apps Script не ответил на проверку соединения. Проверьте, что Bridge опубликован по сохранённому URL."
+          ));
         }, 30000);
-        pendingRpc.set(id, { resolve, reject, timeout });
+        const pending = { resolve, reject, timeout, poll: 0 };
+        pendingRpc.set(id, pending);
         const send = () => {
           if (!bridgeReady) {
-            pendingRpc.delete(id);
-            window.clearTimeout(timeout);
-            reject(new Error("Соединение с сервером ещё устанавливается. Попробуйте ещё раз."));
             return;
           }
+          window.clearInterval(pending.poll);
           postToBackendFrames({ id, action, payload });
         };
         if (bridgeReady) send();
         else {
-          const poll = window.setInterval(() => {
+          const ping = () => postToBackendFrames({ type: "family-chores-bridge-ping" });
+          pending.poll = window.setInterval(() => {
             if (!pendingRpc.has(id)) {
-              window.clearInterval(poll);
+              window.clearInterval(pending.poll);
             } else if (bridgeReady) {
-              window.clearInterval(poll);
               send();
+            } else {
+              ping();
             }
-          }, 100);
+          }, 500);
+          ping();
         }
       });
     }
