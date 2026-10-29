@@ -103,6 +103,25 @@ function doGet() {
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
+function doPost(e) {
+  try {
+    const body = JSON.parse(e && e.postData && e.postData.contents || "");
+    if (!body || typeof body.action !== "string" ||
+        !body.payload || typeof body.payload !== "object" || Array.isArray(body.payload)) {
+      throw new Error("Некорректный запрос.");
+    }
+    return ContentService.createTextOutput(JSON.stringify({
+      ok: true,
+      result: apiDispatch(body.action, body.payload)
+    })).setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    return ContentService.createTextOutput(JSON.stringify({
+      ok: false,
+      error: error && error.message ? error.message : "Ошибка серверного запроса."
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
 function apiDispatch(action, payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("Некорректный запрос.");

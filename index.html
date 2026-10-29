@@ -353,7 +353,6 @@
       line-height: 1.5;
     }
     .hidden { display: none !important; }
-    #backend-bridge { position: fixed; width: 1px; height: 1px; border: 0; opacity: 0; pointer-events: none; }
 
     @media (max-width: 560px) {
       .shell { width: min(100% - 24px, 920px); padding-top: 17px; }
@@ -377,14 +376,14 @@
       <div class="demo-badge">Прототип · данные пока только на этом устройстве</div>
     </header>
     <main id="app" aria-live="polite"></main>
-    <iframe id="backend-bridge" title="Соединение с семейной базой" aria-hidden="true"></iframe>
     </div>
 
   <script>
     "use strict";
 
     const STORAGE_KEY = "family-chores-prototype-v1";
-    const BACKEND_URL_KEY = "family-chores-backend-url-v1";
+    const LEGACY_BACKEND_URL_KEY = "family-chores-backend-url-v1";
+    const API_URL_KEY = "family-chores-api-url-v2";
     const THEME_KEY = "family-chores-theme-v1";
     const THEMES = {
       default: { label: "По умолчанию", color: "#eeece4" },
@@ -411,17 +410,13 @@
 
     let selectedTheme = THEMES[localStorage.getItem(THEME_KEY)] ? localStorage.getItem(THEME_KEY) : "default";
     let state = loadState();
-    let backendUrl = localStorage.getItem(BACKEND_URL_KEY) || "";
-    let cloudLoginMode = Boolean(backendUrl);
+    let apiUrl = localStorage.getItem(API_URL_KEY) || "";
+    let cloudLoginMode = Boolean(apiUrl || localStorage.getItem(LEGACY_BACKEND_URL_KEY));
     let currentSessionToken = "";
     let currentRole = "";
     let currentServerVersion = 0;
     let cloudSaveQueue = Promise.resolve();
     let cloudRefreshTimer = 0;
-    let bridgeReady = false;
-    let bridgeFrameUrl = "";
-    let nextRpcId = 0;
-    const pendingRpc = new Map();
     let selectedRole = "";
     let currentMemberId = "";
     let addingMember = false;
@@ -527,120 +522,56 @@
       return cloudSaveQueue;
     }
 
-    function setBackendUrl(value) {
-      const url = new URL(String(value || "").trim());
-      if (url.protocol !== "https:" || url.hostname !== "script.google.com" ||
-          !/^\/macros\/s\/[^/]+\/exec\/?$/.test(url.pathname)) {
-        throw new Error("Введите URL веб-приложения Apps Script, заканчивающийся на /exec.");
+    function setApiUrl(value) {
+      let url;
+      try {
+        url = new URL(String(value || "").trim());
+      } catch (error) {
+        throw new Error("Введите полный HTTPS-адрес Cloudflare Worker.");
       }
-      backendUrl = url.href;
-      localStorage.setItem(BACKEND_URL_KEY, backendUrl);
+      const localHost = ["localhost", "127.0.0.1"].includes(url.hostname);
+      if ((!localHost && (url.protocol !== "https:" || !url.hostname.endsWith(".workers.dev"))) ||
+          (localHost && !["http:", "https:"].includes(url.protocol)) ||
+          (url.pathname !== "/" && url.pathname !== "") || url.search || url.hash) {
+        throw new Error("Введите корневой HTTPS-адрес Cloudflare Worker, заканчивающийся на .workers.dev.");
+      }
+      apiUrl = url.origin;
+      localStorage.setItem(API_URL_KEY, apiUrl);
       cloudLoginMode = true;
-      const iframeUrl = `${backendUrl}${backendUrl.includes("?") ? "&" : "?"}bridge=1`;
-      if (bridgeFrameUrl !== iframeUrl) {
-        bridgeReady = false;
-        bridgeFrameUrl = iframeUrl;
-        document.getElementById("backend-bridge").src = iframeUrl;
-      }
     }
 
-    function isBackendBridgeWindow(source) {
-      const frame = document.getElementById("backend-bridge");
-      const visit = (target, depth) => {
-        if (target === source) return true;
-        if (depth >= 5) return false;
-        for (let index = 0; index < target.frames.length; index += 1) {
-          if (visit(target.frames[index], depth + 1)) return true;
-        }
-        return false;
-      };
-      return visit(frame.contentWindow, 0);
-    }
-
-    function isBackendOrigin(origin) {
+    async function apiCall(action, payload) {
+      if (!apiUrl) throw new Error("Сначала укажите адрес Cloudflare Worker.");
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 30000);
       try {
-        const hostname = new URL(origin).hostname;
-        return hostname === "script.google.com" ||
-          hostname.endsWith(".script.googleusercontent.com");
-      } catch (error) {
-        return false;
-      }
-    }
-
-    function postToBackendFrames(message) {
-      const frame = document.getElementById("backend-bridge");
-      const send = (target, depth) => {
-        target.postMessage(message, "*");
-        if (depth >= 5) return;
-        for (let index = 0; index < target.frames.length; index += 1) {
-          send(target.frames[index], depth + 1);
-        }
-      };
-      send(frame.contentWindow, 0);
-    }
-
-    window.addEventListener("message", event => {
-      if (!isBackendOrigin(event.origin) || !isBackendBridgeWindow(event.source)) return;
-      const message = event.data;
-      if (message?.type === "family-chores-bridge-ready") {
-        bridgeReady = true;
-        pendingRpc.forEach(pending => {
-          pending.bridgeResponded = true;
+        const response = await fetch(apiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, payload }),
+          signal: controller.signal
         });
-        return;
-      }
-      if (!message || typeof message.id !== "string") return;
-      const pending = pendingRpc.get(message.id);
-      if (!pending) return;
-      pendingRpc.delete(message.id);
-      window.clearTimeout(pending.timeout);
-      window.clearInterval(pending.poll);
-      if (message.ok) pending.resolve(message.result);
-      else pending.reject(new Error(String(message.error || "Ошибка сервера.")));
-    });
-
-    function apiCall(action, payload) {
-      if (!backendUrl) return Promise.reject(new Error("Сначала укажите URL веб-приложения Apps Script."));
-      try {
-        if (!bridgeFrameUrl) setBackendUrl(backendUrl);
-      } catch (error) {
-        return Promise.reject(error);
-      }
-      return new Promise((resolve, reject) => {
-        const id = `rpc-${Date.now()}-${++nextRpcId}`;
-        const timeout = window.setTimeout(() => {
-          const pending = pendingRpc.get(id);
-          if (pending) window.clearInterval(pending.poll);
-          pendingRpc.delete(id);
-          reject(new Error(pending?.bridgeResponded
-            ? "Мост ответил, но Apps Script не завершил запрос. Проверьте Code.gs и доступ к таблице."
-            : "Мост Apps Script не ответил на проверку соединения. Проверьте, что Bridge опубликован по сохранённому URL."
-          ));
-        }, 30000);
-        const pending = { resolve, reject, timeout, poll: 0 };
-        pendingRpc.set(id, pending);
-        const send = () => {
-          if (!bridgeReady) {
-            return;
-          }
-          window.clearInterval(pending.poll);
-          postToBackendFrames({ id, action, payload });
-        };
-        if (bridgeReady) send();
-        else {
-          const ping = () => postToBackendFrames({ type: "family-chores-bridge-ping" });
-          pending.poll = window.setInterval(() => {
-            if (!pendingRpc.has(id)) {
-              window.clearInterval(pending.poll);
-            } else if (bridgeReady) {
-              send();
-            } else {
-              ping();
-            }
-          }, 500);
-          ping();
+        let result;
+        try {
+          result = await response.json();
+        } catch (error) {
+          throw new Error("Прокси вернул некорректный ответ. Проверьте публикацию Cloudflare Worker.");
         }
-      });
+        if (!response.ok || !result || result.ok !== true) {
+          throw new Error(String(result?.error || `Ошибка сервера (HTTP ${response.status}).`));
+        }
+        return result.result;
+      } catch (error) {
+        if (error.name === "AbortError") {
+          throw new Error("Сервер не ответил за 30 секунд. Проверьте доступность Cloudflare Worker и Apps Script.");
+        }
+        if (error instanceof TypeError) {
+          throw new Error("Не удалось связаться с Cloudflare Worker. Проверьте его адрес, публикацию и настройки CORS.");
+        }
+        throw error;
+      } finally {
+        window.clearTimeout(timeout);
+      }
     }
 
     function escapeHtml(value) {
@@ -848,10 +779,10 @@
               <label for="family-code">Семейный код</label>
               <input id="family-code" name="familyCode" maxlength="40" autocomplete="off" required>
             </div>
-            ${parent && !backendUrl ? `
+            ${parent ? `
               <div class="field">
-                <label for="backend-url">URL веб-приложения Apps Script</label>
-                <input id="backend-url" name="backendUrl" type="url" placeholder="https://script.google.com/macros/s/.../exec" required>
+                <label for="api-url">Адрес Cloudflare Worker</label>
+                <input id="api-url" name="apiUrl" type="url" value="${escapeHtml(apiUrl)}" placeholder="https://family-chores.account.workers.dev" required>
               </div>
             ` : ""}
             ${parent ? `
@@ -859,13 +790,13 @@
               <div class="field"><label for="parent-pin-login">Четырёхзначный PIN родителей</label><input id="parent-pin-login" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required></div>
             ` : ""}
             ${child ? `<div class="field"><label for="child-invite-code">Личный код входа ребёнка</label><input id="child-invite-code" name="inviteCode" maxlength="80" autocomplete="off" required><span class="hint">Его выдаёт родителю приложение при создании профиля ребёнка. Имя само по себе не защищает вход.</span></div>` : ""}
-            ${parent && backendUrl ? `<p class="hint">Адрес семейной базы уже сохранён на этом устройстве.</p>` : ""}
-            ${child && !backendUrl ? `<p class="hint">Семейная база ещё не настроена на этом устройстве. Попросите родителя подключить её.</p>` : ""}
+            ${parent && apiUrl ? `<p class="hint">Адрес сохранён на этом устройстве. Здесь его можно изменить.</p>` : ""}
+            ${child && !apiUrl ? `<p class="hint">Семейная база ещё не настроена на этом устройстве. Попросите родителя подключить её.</p>` : ""}
             <p class="error" id="form-error">${escapeHtml(notice || (selectedRole ? "" : "Сначала выберите роль."))}</p>
-            <div class="form-actions"><button class="button" type="submit" ${selectedRole && (parent || Boolean(backendUrl)) ? "" : "disabled"}>Войти</button></div>
+            <div class="form-actions"><button class="button" type="submit" ${selectedRole && (parent || Boolean(apiUrl)) ? "" : "disabled"}>Войти</button></div>
           </form>
         </section>
-        ${selectedRole === "parent" ? `<div class="disclaimer">Подключение семейной базы настраивается родителем. URL сохранится на этом устройстве; детям он не показывается.</div>` : ""}
+        ${selectedRole === "parent" ? `<div class="disclaimer">Подключение семейной базы настраивается родителем. Адрес Cloudflare Worker сохранится на этом устройстве; детям он не показывается.</div>` : ""}
         <div class="form-actions"><button class="button secondary small" type="button" id="offline-mode">Вернуться к локальному прототипу</button></div>
       `;
     }
@@ -1719,16 +1650,16 @@
           render();
           return;
         }
-        if (selectedRole === "parent" && form.has("backendUrl")) {
+        if (selectedRole === "parent" && form.has("apiUrl")) {
           try {
-            setBackendUrl(form.get("backendUrl"));
+            setApiUrl(form.get("apiUrl"));
           } catch (error) {
             notice = error.message;
             render();
             return;
           }
-        } else if (!backendUrl) {
-          notice = "Попросите родителя подключить семейную базу на этом устройстве.";
+        } else if (!apiUrl) {
+          notice = "Попросите родителя указать адрес Cloudflare Worker на этом устройстве.";
           render();
           return;
         }
