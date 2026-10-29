@@ -321,10 +321,6 @@ function validateParentState_(current, next) {
       throw new Error("Для дела выбран неизвестный профиль ребёнка.");
     }
   });
-  if (current.tasks.some(task => !nextTaskIds.has(task.id))) {
-    throw new Error("Удалять дела с историей нельзя; отключите их.");
-  }
-
   current.requests.forEach(request => {
     const candidate = next.requests.find(item => item.id === request.id);
     if (request.status === "pending" && candidate &&

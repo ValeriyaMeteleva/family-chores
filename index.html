@@ -272,6 +272,7 @@
     .member-role { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
     .member-details { display: grid; gap: 5px; }
     .member-controls { display: grid; justify-items: end; gap: 7px; }
+    .task-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
     .money-small { color: var(--muted); font-size: 12px; }
     .settings-group { margin: 18px 0; padding-top: 14px; border-top: 1px solid var(--line); }
     .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 9px; margin-top: 10px; }
@@ -794,7 +795,7 @@
       return `
         <p class="eyebrow">Облачная семейная база</p>
         <h1>Войдите в семейный профиль</h1>
-        <p class="intro">Данные загрузятся из закрытой Google-таблицы.</p>
+        <p class="intro">Общая семейная база хранит дела, заявки, балансы и историю, чтобы они синхронизировались между устройствами. Настраивает её родитель.</p>
         <section class="panel">
           <div class="role-grid">
             <button type="button" class="role-option" data-role="child" aria-pressed="${child}">Ребёнок</button>
@@ -802,24 +803,27 @@
           </div>
           <form id="cloud-login-form">
             <div class="field">
-              <label for="backend-url">URL веб-приложения Apps Script</label>
-              <input id="backend-url" name="backendUrl" type="url" value="${escapeHtml(backendUrl)}" placeholder="https://script.google.com/macros/s/.../exec" required>
-            </div>
-            <div class="field">
               <label for="family-code">Семейный код</label>
               <input id="family-code" name="familyCode" maxlength="40" autocomplete="off" required>
             </div>
+            ${parent && !backendUrl ? `
+              <div class="field">
+                <label for="backend-url">URL веб-приложения Apps Script</label>
+                <input id="backend-url" name="backendUrl" type="url" placeholder="https://script.google.com/macros/s/.../exec" required>
+              </div>
+            ` : ""}
             ${parent ? `
               <div class="field"><label for="parent-name">Ваше имя</label><input id="parent-name" name="name" maxlength="40" autocomplete="name" required></div>
               <div class="field"><label for="parent-pin-login">Четырёхзначный PIN родителей</label><input id="parent-pin-login" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required></div>
             ` : ""}
-            ${child ? `<div class="field"><label for="child-invite-code">Код профиля ребёнка</label><input id="child-invite-code" name="inviteCode" maxlength="80" autocomplete="off" required></div>` : ""}
+            ${child ? `<div class="field"><label for="child-invite-code">Личный код входа ребёнка</label><input id="child-invite-code" name="inviteCode" maxlength="80" autocomplete="off" required><span class="hint">Его выдаёт родителю приложение при создании профиля ребёнка. Имя само по себе не защищает вход.</span></div>` : ""}
+            ${parent && backendUrl ? `<p class="hint">Адрес семейной базы уже сохранён на этом устройстве.</p>` : ""}
+            ${child && !backendUrl ? `<p class="hint">Семейная база ещё не настроена на этом устройстве. Попросите родителя подключить её.</p>` : ""}
             <p class="error" id="form-error">${escapeHtml(notice || (selectedRole ? "" : "Сначала выберите роль."))}</p>
-            <div class="form-actions"><button class="button" type="submit" ${selectedRole ? "" : "disabled"}>Войти</button></div>
+            <div class="form-actions"><button class="button" type="submit" ${selectedRole && (parent || Boolean(backendUrl)) ? "" : "disabled"}>Войти</button></div>
           </form>
         </section>
-        <div class="disclaimer">Родительский вход защищён семейным кодом и PIN. Код профиля ребёнка действует как пароль — храните его в семье и не публикуйте.</div>
-        ${!backendUrl ? `<p class="hint">Сервер ещё нужно развернуть в Google Apps Script. Не вводите здесь семейный код, пока вы не настроили его по инструкции.</p>` : ""}
+        ${selectedRole === "parent" ? `<div class="disclaimer">Подключение семейной базы настраивается родителем. URL сохранится на этом устройстве; детям он не показывается.</div>` : ""}
         <div class="form-actions"><button class="button secondary small" type="button" id="offline-mode">Вернуться к локальному прототипу</button></div>
       `;
     }
@@ -1005,6 +1009,41 @@
           </div>
         `;
       }
+      if (modal.type === "edit-task") {
+        const task = state.tasks.find(item => item.id === modal.taskId);
+        if (!task) return "";
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">Изменить дело</h2>
+              <form id="edit-task-form">
+                <div class="field"><label for="edit-task-title">Название</label><input id="edit-task-title" name="title" maxlength="60" value="${escapeHtml(task.title)}" required></div>
+                <div class="field"><label for="edit-task-price">Цена, ₽</label><input id="edit-task-price" name="price" type="number" min="0.01" max="100000" step="0.01" value="${escapeHtml(task.price)}" required></div>
+                <div class="field"><label for="edit-task-child">Кому видно</label><select id="edit-task-child" name="visibleTo"><option value="">Всем детям</option>${state.members.filter(child => child.role === "child").map(child => `<option value="${escapeHtml(child.id)}" ${task.visibleTo === child.id ? "selected" : ""}>${escapeHtml(child.name)}</option>`).join("")}</select></div>
+                <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
+                <div class="form-actions"><button class="button" type="submit">Сохранить</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
+              </form>
+            </section>
+          </div>
+        `;
+      }
+      if (modal.type === "delete-task") {
+        const task = state.tasks.find(item => item.id === modal.taskId);
+        if (!task) return "";
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">Удалить дело?</h2>
+              <p class="intro">${escapeHtml(task.title)} · ${money(task.price)}</p>
+              <p class="hint">Дело исчезнет из списка. Уже отправленные заявки и история сохранятся.</p>
+              <form id="delete-task-form">
+                <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
+                <div class="form-actions"><button class="button danger" type="submit">Удалить</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
+              </form>
+            </section>
+          </div>
+        `;
+      }
       if (modal.type === "review") {
         const request = state.requests.find(item => item.id === modal.requestId);
         if (!request) return "";
@@ -1154,7 +1193,6 @@
           </form>
         </section>
         <div class="disclaimer">Локальный прототип хранит данные только в этом браузере.</div>
-        <div class="form-actions"><button class="button secondary small" type="button" id="cloud-connect">Подключить Google-таблицу</button></div>
       `;
     }
 
@@ -1170,7 +1208,7 @@
           <form id="login-form">
             <div class="field"><label for="member-select">Профиль</label><select id="member-select" name="memberId">${members}</select></div>
             <p class="error" id="form-error">${escapeHtml(notice)}</p>
-            <div class="form-actions"><button class="button" type="submit">Открыть</button><button class="button secondary" type="button" id="add-member">Добавить участника</button><button class="button secondary small" type="button" id="cloud-connect">Подключить Google-таблицу</button></div>
+            <div class="form-actions"><button class="button" type="submit">Открыть</button><button class="button secondary" type="button" id="add-member">Добавить участника</button></div>
           </form>
         </section>
       `;
@@ -1220,7 +1258,7 @@
           <div><p class="eyebrow">Привет, ${escapeHtml(member.name)}!</p><h1>Твои дела</h1></div>
           <div class="dashboard-actions">
             <button type="button" class="icon-button" id="open-settings" aria-label="Настройки" title="Настройки">
-              <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.6 2.77-.08-.02a1.7 1.7 0 0 0-1.75.62l-.04.07h-3.2l-.04-.07a1.7 1.7 0 0 0-1.75-.62l-.08.02-1.6-2.77.06-.06A1.7 1.7 0 0 0 10 15l-.09-.03v-3.2L10 11.7a1.7 1.7 0 0 0-.34-1.88L9.6 9.76l1.6-2.77.08.02a1.7 1.7 0 0 0 1.75-.62l.04-.07h3.2l.04.07a1.7 1.7 0 0 0 1.75.62l.08-.02 1.6 2.77-.06.06A1.7 1.7 0 0 0 19.4 11l.09.03v3.2z"/></svg>
+              <span aria-hidden="true" style="font-size:22px;line-height:1">⚙</span>
             </button>
             <button type="button" class="button secondary small" id="switch-profile">Сменить профиль</button>
           </div>
@@ -1313,7 +1351,13 @@
       const tasks = state.tasks.map(task => `
         <article class="member-card">
           <div><strong>${escapeHtml(task.title)}</strong><span class="member-role">${task.active ? "Доступно" : "Скрыто"} · ${task.visibleTo ? `Только для ${escapeHtml(memberName(task.visibleTo))}` : "Видят все дети"}</span></div>
-          <span class="member-balance">${money(task.price)}</span>
+          <div class="member-controls">
+            <span class="member-balance">${money(task.price)}</span>
+            <div class="task-controls">
+              <button type="button" class="button secondary small" data-edit-task="${escapeHtml(task.id)}">Изменить</button>
+              <button type="button" class="button danger small" data-delete-task="${escapeHtml(task.id)}">Удалить</button>
+            </div>
+          </div>
         </article>
       `).join("");
       return `
@@ -1321,11 +1365,17 @@
           <div><p class="eyebrow">Родитель · ${escapeHtml(member.name)}</p><h1>Семейная панель</h1></div>
           <div class="dashboard-actions">
             <button type="button" class="icon-button" id="open-settings" aria-label="Настройки" title="Настройки">
-              <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.6 2.77-.08-.02a1.7 1.7 0 0 0-1.75.62l-.04.07h-3.2l-.04-.07a1.7 1.7 0 0 0-1.75-.62l-.08.02-1.6-2.77.06-.06A1.7 1.7 0 0 0 10 15l-.09-.03v-3.2L10 11.7a1.7 1.7 0 0 0-.34-1.88L9.6 9.76l1.6-2.77.08.02a1.7 1.7 0 0 0 1.75-.62l.04-.07h3.2l.04.07a1.7 1.7 0 0 0 1.75.62l.08-.02 1.6 2.77-.06.06A1.7 1.7 0 0 0 19.4 11l.09.03v3.2z"/></svg>
+              <span aria-hidden="true" style="font-size:22px;line-height:1">⚙</span>
             </button>
             <button type="button" class="button secondary small" id="switch-profile">Сменить профиль</button>
           </div>
         </div>
+        ${!currentSessionToken ? `
+          <section class="panel" style="margin-bottom:14px">
+            <p class="intro">Общая Google-таблица нужна, чтобы дела, заявки, балансы и история были одинаковыми на устройствах родителей и детей. Подключение настраивает родитель.</p>
+            <button type="button" class="button secondary small" id="cloud-connect">Подключить семейную базу</button>
+          </section>
+        ` : ""}
         <div class="section-heading"><h2>Баланс детей</h2></div>
         <div class="member-list">${children}</div>
         <div class="section-heading"><h2>Нужно проверить</h2><span class="section-note">${pending.length} заявок</span></div>
@@ -1371,7 +1421,7 @@
 
       if (event.target.closest("#cloud-connect")) {
         cloudLoginMode = true;
-        selectedRole = "";
+        selectedRole = "parent";
         notice = "";
         render();
         return;
@@ -1412,6 +1462,20 @@
 
       if (event.target.closest("#open-settings")) {
         modal = { type: "settings" };
+        render();
+        return;
+      }
+
+      const editTaskButton = event.target.closest("[data-edit-task]");
+      if (editTaskButton) {
+        modal = { type: "edit-task", taskId: editTaskButton.dataset.editTask, error: "" };
+        render();
+        return;
+      }
+
+      const deleteTaskButton = event.target.closest("[data-delete-task]");
+      if (deleteTaskButton) {
+        modal = { type: "delete-task", taskId: deleteTaskButton.dataset.deleteTask, error: "" };
         render();
         return;
       }
@@ -1613,10 +1677,16 @@
           render();
           return;
         }
-        try {
-          setBackendUrl(form.get("backendUrl"));
-        } catch (error) {
-          notice = error.message;
+        if (selectedRole === "parent" && form.has("backendUrl")) {
+          try {
+            setBackendUrl(form.get("backendUrl"));
+          } catch (error) {
+            notice = error.message;
+            render();
+            return;
+          }
+        } else if (!backendUrl) {
+          notice = "Попросите родителя подключить семейную базу на этом устройстве.";
           render();
           return;
         }
@@ -1692,6 +1762,53 @@
           state.tasks.push({ id: crypto.randomUUID(), title: title.slice(0, 60), price, active: true, visibleTo });
           saveState(currentSessionToken ? pin : "");
           notice = "Дело добавлено.";
+          render();
+        });
+      }
+
+      if (event.target.id === "edit-task-form") {
+        event.preventDefault();
+        const form = new FormData(event.target);
+        const title = String(form.get("title") || "").trim();
+        const price = Number(form.get("price"));
+        const visibleTo = String(form.get("visibleTo") || "");
+        if (!title || title.length > 60 || !Number.isFinite(price) || price <= 0 || price > 100000) {
+          modal.error = "Введите название до 60 символов и цену от 0,01 до 100 000 ₽.";
+          render();
+          return;
+        }
+        const taskId = modal.taskId;
+        openParentAction(pin => {
+          const task = state.tasks.find(item => item.id === taskId);
+          if (!task) {
+            notice = "Это дело уже удалено.";
+            render();
+            return;
+          }
+          task.title = title;
+          task.price = Math.round(price * 100) / 100;
+          task.visibleTo = visibleTo;
+          modal = null;
+          saveState(currentSessionToken ? pin : "");
+          notice = "Изменения дела сохранены.";
+          render();
+        });
+      }
+
+      if (event.target.id === "delete-task-form") {
+        event.preventDefault();
+        const taskId = modal.taskId;
+        openParentAction(pin => {
+          const taskIndex = state.tasks.findIndex(item => item.id === taskId);
+          if (taskIndex === -1) {
+            notice = "Это дело уже удалено.";
+            render();
+            return;
+          }
+          state.tasks.splice(taskIndex, 1);
+          modal = null;
+          saveState(currentSessionToken ? pin : "");
+          notice = "Дело удалено. История заявок сохранена.";
           render();
         });
       }
