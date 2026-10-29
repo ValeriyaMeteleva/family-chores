@@ -11,20 +11,22 @@
       const ALLOWED_ORIGINS = new Set([
         "https://valeriyameteleva.github.io",
         "http://127.0.0.1:8765",
-        "http://localhost:8765"
+        "http://127.0.0.1:8766",
+        "http://localhost:8765",
+        "http://localhost:8766"
       ]);
 
       window.addEventListener("message", event => {
-        if (event.source !== window.parent || !ALLOWED_ORIGINS.has(event.origin)) return;
+        if (event.source !== window.top || !ALLOWED_ORIGINS.has(event.origin)) return;
         const message = event.data;
         if (!message || typeof message.id !== "string" || typeof message.action !== "string") return;
 
         google.script.run
           .withSuccessHandler(result => {
-            window.parent.postMessage({ id: message.id, ok: true, result }, event.origin);
+            window.top.postMessage({ id: message.id, ok: true, result }, event.origin);
           })
           .withFailureHandler(error => {
-            window.parent.postMessage({
+            window.top.postMessage({
               id: message.id,
               ok: false,
               error: error && error.message ? error.message : "Ошибка серверного запроса."
@@ -33,9 +35,7 @@
           .apiDispatch(message.action, message.payload || {});
       });
 
-      window.parent.postMessage({ type: "family-chores-bridge-ready" }, "https://valeriyameteleva.github.io");
-      window.parent.postMessage({ type: "family-chores-bridge-ready" }, "http://127.0.0.1:8765");
-      window.parent.postMessage({ type: "family-chores-bridge-ready" }, "http://localhost:8765");
+      window.top.postMessage({ type: "family-chores-bridge-ready" }, "*");
     </script>
   </body>
 </html>

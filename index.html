@@ -544,9 +544,43 @@
       }
     }
 
-    window.addEventListener("message", event => {
+    function isBackendBridgeWindow(source) {
       const frame = document.getElementById("backend-bridge");
-      if (event.source !== frame.contentWindow) return;
+      const visit = (target, depth) => {
+        if (target === source) return true;
+        if (depth >= 5) return false;
+        for (let index = 0; index < target.frames.length; index += 1) {
+          if (visit(target.frames[index], depth + 1)) return true;
+        }
+        return false;
+      };
+      return visit(frame.contentWindow, 0);
+    }
+
+    function isBackendOrigin(origin) {
+      try {
+        const hostname = new URL(origin).hostname;
+        return hostname === "script.google.com" ||
+          hostname.endsWith(".script.googleusercontent.com");
+      } catch (error) {
+        return false;
+      }
+    }
+
+    function postToBackendFrames(message) {
+      const frame = document.getElementById("backend-bridge");
+      const send = (target, depth) => {
+        target.postMessage(message, "*");
+        if (depth >= 5) return;
+        for (let index = 0; index < target.frames.length; index += 1) {
+          send(target.frames[index], depth + 1);
+        }
+      };
+      send(frame.contentWindow, 0);
+    }
+
+    window.addEventListener("message", event => {
+      if (!isBackendOrigin(event.origin) || !isBackendBridgeWindow(event.source)) return;
       const message = event.data;
       if (message?.type === "family-chores-bridge-ready") {
         bridgeReady = true;
@@ -582,10 +616,7 @@
             reject(new Error("Соединение с сервером ещё устанавливается. Попробуйте ещё раз."));
             return;
           }
-          document.getElementById("backend-bridge").contentWindow.postMessage(
-            { id, action, payload },
-            "*"
-          );
+          postToBackendFrames({ id, action, payload });
         };
         if (bridgeReady) send();
         else {
