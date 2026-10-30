@@ -160,6 +160,25 @@
     .button.secondary { border: 1px solid var(--line); background: var(--card); color: var(--ink); }
     .button.danger { background: #a74b43; }
     .button.small { min-height: 38px; padding: 8px 12px; font-size: 14px; }
+    .account-grid { display: grid; gap: 12px; margin: 20px 0; }
+    .account-button {
+      display: flex;
+      min-height: 64px;
+      align-items: center;
+      justify-content: flex-start;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--card);
+      color: var(--ink);
+      padding: 16px 20px;
+      font-size: 18px;
+      font-weight: 700;
+      text-align: left;
+    }
+    .account-grid { display: grid; gap: 12px; margin: 20px 0; }
+    .account-button:hover { border-color: var(--green); background: var(--green-light); }
+    .account-button .section-note { margin-left: auto; }
+    .login-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
     .form-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
     .hint { margin: 9px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
     .error { min-height: 20px; margin: 10px 0 0; color: var(--red); font-size: 14px; }
@@ -388,6 +407,7 @@
     const API_URL_KEY = "family-chores-api-url-v2";
     const FAMILY_CODE_KEY = "family-chores-family-code-v1";
     const PARENT_NAME_KEY = "family-chores-parent-name-v1";
+    const PARENT_PROFILES_KEY = "family-chores-parent-profiles-v1";
     const CHILD_PROFILES_KEY = "family-chores-child-profiles-v1";
     const SYNC_VERSION_KEY = "family-chores-sync-version-v1";
     const SYNC_MEMBER_ID_KEY = "family-chores-sync-member-id-v1";
@@ -431,6 +451,9 @@
     let currentRole = "";
     let currentServerVersion = 0;
     let selectedRole = "";
+    let loginSettingsOpen = false;
+    let selectedLoginProfile = null;
+    let isLoggingIn = false;
     let currentMemberId = "";
     let addingMember = false;
     let modal = null;
@@ -474,6 +497,47 @@
         .filter(member => member.role === "child")
         .map(member => ({ id: member.id, name: member.name }));
       localStorage.setItem(CHILD_PROFILES_KEY, JSON.stringify(childProfiles));
+    }
+
+    function loadParentProfiles() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(PARENT_PROFILES_KEY) || "[]");
+        return Array.isArray(saved) ? saved : [];
+      } catch (error) {
+        console.error("Не удалось загрузить список родительских профилей.", error);
+        return [];
+      }
+    }
+
+    function cacheParentProfiles(members) {
+      const parents = members
+        .filter(member => member.role === "parent")
+        .map(member => ({ id: member.id, name: member.name }));
+      if (parents.length) {
+        localStorage.setItem(PARENT_PROFILES_KEY, JSON.stringify(parents));
+      }
+    }
+
+    function savedLoginProfiles() {
+      const parents = loadParentProfiles();
+      const rememberedParentName = localStorage.getItem(PARENT_NAME_KEY) || "";
+      if (rememberedParentName && !parents.some(profile =>
+        String(profile.name).toLocaleLowerCase() === rememberedParentName.toLocaleLowerCase()
+      )) {
+        const localParent = state.members.find(member =>
+          member.role === "parent" &&
+          member.name.toLocaleLowerCase() === rememberedParentName.toLocaleLowerCase()
+        );
+        parents.push({
+          id: localParent?.id || `parent:${rememberedParentName}`,
+          name: rememberedParentName,
+          role: "parent"
+        });
+      }
+      return [
+        ...parents.map(profile => ({ ...profile, role: "parent" })),
+        ...childProfiles.map(profile => ({ ...profile, role: "child" }))
+      ];
     }
 
     function rememberChildProfile(member) {
@@ -629,7 +693,10 @@
         state = { ...response.state, pin: null };
         hasUnsyncedChanges = false;
         hasSyncConflict = false;
-        if (currentRole === "parent") cacheChildProfiles(state.members);
+        if (currentRole === "parent") {
+          cacheChildProfiles(state.members);
+          cacheParentProfiles(state.members);
+        }
         else rememberChildProfile(state.members.find(member => member.id === currentMemberId));
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         persistSyncMetadata();
@@ -692,7 +759,10 @@
         state = { ...response.state, pin: null };
         hasUnsyncedChanges = false;
         hasSyncConflict = false;
-        if (currentRole === "parent") cacheChildProfiles(state.members);
+        if (currentRole === "parent") {
+          cacheChildProfiles(state.members);
+          cacheParentProfiles(state.members);
+        }
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         persistSyncMetadata();
         notice = "Семейные изменения приняты.";
@@ -958,6 +1028,55 @@
     }
 
     function renderCloudLogin() {
+      const profiles = savedLoginProfiles();
+      if (profiles.length && !loginSettingsOpen) {
+        if (selectedLoginProfile?.role === "parent") {
+          return `
+            <p class="eyebrow">Облачная семейная база</p>
+            <h1>Здравствуйте, ${escapeHtml(selectedLoginProfile.name)}</h1>
+            <section class="panel">
+              <form id="quick-parent-login-form">
+                <div class="field"><label for="quick-parent-pin">PIN родителей</label><input id="quick-parent-pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required autofocus></div>
+                <p class="error" id="form-error">${escapeHtml(notice)}</p>
+                <div class="form-actions"><button class="button" type="submit" ${isLoggingIn ? "disabled" : ""}>Войти</button><button class="button secondary" type="button" data-back-to-accounts>Назад</button></div>
+              </form>
+            </section>
+          `;
+        }
+        return `
+          <div class="login-heading">
+            <div><p class="eyebrow">Семейный помощник</p><h1>Кто сейчас у экрана?</h1></div>
+            <button type="button" class="icon-button" data-login-settings aria-label="Настройки подключения" title="Настройки подключения">⚙</button>
+          </div>
+          <p class="intro">Выберите свой профиль.</p>
+          <section class="panel account-grid">
+            ${profiles.map(profile => `
+              <button type="button" class="account-button" data-login-profile="${escapeHtml(profile.id)}" data-login-role="${profile.role}" ${isLoggingIn ? "disabled" : ""}>
+                <span>${escapeHtml(profile.name)}</span><span class="section-note">${profile.role === "parent" ? "Родитель" : "Ребёнок"}</span>
+              </button>
+            `).join("")}
+            <p class="error" id="form-error">${escapeHtml(notice)}</p>
+          </section>
+        `;
+      }
+
+      if (loginSettingsOpen && profiles.length) {
+        return `
+          <p class="eyebrow">Настройки подключения</p>
+          <h1>Семейная база</h1>
+          <p class="intro">Проверьте сохранённые данные. После сохранения выберите профиль для входа.</p>
+          <section class="panel">
+            <form id="login-settings-form">
+              <div class="field"><label for="settings-family-code">Семейный код</label><input id="settings-family-code" name="familyCode" maxlength="40" value="${escapeHtml(localStorage.getItem(FAMILY_CODE_KEY) || "")}" autocomplete="off" required></div>
+              <div class="field"><label for="settings-api-url">Адрес Cloudflare Worker</label><input id="settings-api-url" name="apiUrl" type="url" value="${escapeHtml(apiUrl)}" placeholder="https://family-chores.account.workers.dev" required></div>
+              <div class="field"><label for="settings-parent-name">Имя родителя</label><input id="settings-parent-name" name="name" maxlength="40" value="${escapeHtml(localStorage.getItem(PARENT_NAME_KEY) || loadParentProfiles()[0]?.name || "")}" autocomplete="name" required></div>
+              <p class="error" id="form-error">${escapeHtml(notice)}</p>
+              <div class="form-actions"><button class="button" type="submit">Сохранить</button><button class="button secondary" type="button" data-close-login-settings>Отмена</button></div>
+            </form>
+          </section>
+        `;
+      }
+
       const parent = selectedRole === "parent";
       const child = selectedRole === "child";
       return `
@@ -1661,6 +1780,50 @@
         return;
       }
 
+      if (event.target.closest("[data-login-settings]")) {
+        loginSettingsOpen = true;
+        selectedLoginProfile = null;
+        notice = "";
+        render();
+        return;
+      }
+
+      if (event.target.closest("[data-close-login-settings]")) {
+        loginSettingsOpen = false;
+        notice = "";
+        render();
+        return;
+      }
+
+      if (event.target.closest("[data-back-to-accounts]")) {
+        selectedLoginProfile = null;
+        notice = "";
+        render();
+        return;
+      }
+
+      const savedLoginButton = event.target.closest("[data-login-profile]");
+      if (savedLoginButton) {
+        const profile = savedLoginProfiles().find(item =>
+          item.id === savedLoginButton.dataset.loginProfile &&
+          item.role === savedLoginButton.dataset.loginRole
+        );
+        if (!profile) {
+          notice = "Профиль не найден. Откройте настройки и обновите список детей.";
+          render();
+          return;
+        }
+        if (profile.role === "parent") {
+          selectedLoginProfile = profile;
+          selectedRole = "parent";
+          notice = "";
+          render();
+        } else {
+          signInCloud("child", { memberId: profile.id });
+        }
+        return;
+      }
+
       if (event.target.closest("#cloud-connect")) {
         cloudLoginMode = true;
         selectedRole = "parent";
@@ -1899,6 +2062,108 @@
       }
     });
 
+    async function signInCloud(role, { name = "", familyCode = "", pin = "", memberId = "" } = {}) {
+      if (isLoggingIn) return;
+      if (!apiUrl) {
+        notice = "Сначала укажите адрес Cloudflare Worker в настройках.";
+        render();
+        return;
+      }
+      if (role === "parent" && (!name || !familyCode)) {
+        notice = "Заполните имя родителя и семейный код в настройках подключения.";
+        render();
+        return;
+      }
+
+      const rememberedFamilyCode = localStorage.getItem(FAMILY_CODE_KEY) || "";
+      const rememberedParentName = localStorage.getItem(PARENT_NAME_KEY) || "";
+      isLoggingIn = true;
+      selectedRole = role;
+      notice = "Подключаемся к семейной базе…";
+      render();
+
+      try {
+        const action = role === "parent" ? "parentLogin" : "childLogin";
+        const payload = role === "parent"
+          ? { familyCode, name, pin }
+          : { memberId };
+        const response = await apiCall(action, payload);
+        const draftMemberId = localStorage.getItem(SYNC_MEMBER_ID_KEY);
+        if (hasUnsyncedChanges && draftMemberId && draftMemberId !== response.memberId) {
+          throw new Error("На устройстве есть несинхронизированные изменения другого профиля. Войдите в него и отправьте изменения.");
+        }
+        currentSessionToken = response.token;
+        currentMemberId = response.memberId;
+        currentRole = response.role;
+        offlineSession = false;
+        if (hasUnsyncedChanges) {
+          currentServerVersion = Number(localStorage.getItem(SYNC_VERSION_KEY) || 0);
+        } else {
+          currentServerVersion = response.version;
+          state = { ...response.state, pin: null };
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          hasSyncConflict = false;
+          if (role === "parent") cacheChildProfiles(response.state.members);
+        }
+        if (role === "parent") {
+          localStorage.setItem(FAMILY_CODE_KEY, familyCode);
+          localStorage.setItem(PARENT_NAME_KEY, name);
+          cacheParentProfiles(response.state.members);
+          try {
+            await saveOfflinePin(pin, response.memberId);
+          } catch (error) {
+            console.error("Не удалось сохранить PIN-проверку для офлайн-входа.", error);
+          }
+        } else {
+          rememberChildProfile({ id: response.memberId, name: response.name, role: "child" });
+        }
+        persistSyncMetadata();
+        choreHistoryOpen = false;
+        paymentHistoryOpen = false;
+        selectedLoginProfile = null;
+        loginSettingsOpen = false;
+        notice = hasUnsyncedChanges ? "Вход выполнен. На устройстве есть несинхронизированные правки." : "";
+        render();
+      } catch (error) {
+        console.error("Не удалось войти в семейную Google-таблицу.", error);
+        const connectionUnavailable = error.name === "TypeError" ||
+          Number(error.httpStatus) >= 500 ||
+          /не удалось связаться|сервер не ответил/i.test(error.message);
+        let offlinePinProfile = null;
+        try {
+          const savedPins = JSON.parse(localStorage.getItem(OFFLINE_PIN_KEY) || "null");
+          const pins = Array.isArray(savedPins) ? savedPins : savedPins ? [savedPins] : [];
+          const matchingParent = state.members.find(member =>
+            member.role === "parent" && member.name.toLocaleLowerCase() === name.toLocaleLowerCase()
+          );
+          offlinePinProfile = pins.find(profile => profile.memberId === matchingParent?.id) || null;
+        } catch (storageError) {
+          console.error("Не удалось прочитать сохранённый офлайн-профиль.", storageError);
+        }
+        if (connectionUnavailable && role === "parent" &&
+            familyCode.toUpperCase() === rememberedFamilyCode.toUpperCase() &&
+            name.toLocaleLowerCase() === rememberedParentName.toLocaleLowerCase() &&
+            offlinePinProfile && await verifyOfflinePin(pin, offlinePinProfile.memberId)) {
+          if (startOfflineSession(offlinePinProfile.memberId, "parent",
+            "Офлайн-вход выполнен. Изменения останутся на этом устройстве до отправки.")) {
+            render();
+            return;
+          }
+        } else if (connectionUnavailable && role === "child" &&
+            childProfiles.some(profile => profile.id === memberId) &&
+            startOfflineSession(memberId, "child",
+              "Офлайн-вход выполнен. Изменения останутся на этом устройстве до отправки.")) {
+          render();
+          return;
+        }
+        notice = error.message;
+        render();
+      } finally {
+        isLoggingIn = false;
+        if (!currentSessionToken && !offlineSession) render();
+      }
+    }
+
     document.addEventListener("submit", event => {
       const activeMember = state.members.find(item => item.id === currentMemberId);
       const paymentConfirmationRequired = activeMember?.role === "child" &&
@@ -1944,6 +2209,39 @@
         addMember(name, selectedRole);
       }
 
+      if (event.target.id === "login-settings-form") {
+        event.preventDefault();
+        const form = new FormData(event.target);
+        const familyCode = String(form.get("familyCode") || "").trim();
+        const name = String(form.get("name") || "").trim();
+        if (!familyCode || !name) {
+          document.getElementById("form-error").textContent = "Введите семейный код и имя родителя.";
+          return;
+        }
+        try {
+          setApiUrl(form.get("apiUrl"));
+        } catch (error) {
+          document.getElementById("form-error").textContent = error.message;
+          return;
+        }
+        localStorage.setItem(FAMILY_CODE_KEY, familyCode);
+        localStorage.setItem(PARENT_NAME_KEY, name);
+        loginSettingsOpen = false;
+        selectedLoginProfile = null;
+        notice = "";
+        render();
+        refreshChildProfiles();
+      }
+
+      if (event.target.id === "quick-parent-login-form") {
+        event.preventDefault();
+        signInCloud("parent", {
+          name: selectedLoginProfile?.name || localStorage.getItem(PARENT_NAME_KEY) || "",
+          familyCode: localStorage.getItem(FAMILY_CODE_KEY) || "",
+          pin: String(new FormData(event.target).get("pin") || "")
+        });
+      }
+
       if (event.target.id === "cloud-login-form") {
         event.preventDefault();
         const form = new FormData(event.target);
@@ -1951,8 +2249,7 @@
         const familyCode = String(form.get("familyCode") || "").trim();
         const pin = String(form.get("pin") || "");
         const memberId = String(form.get("memberId") || "");
-        const rememberedFamilyCode = localStorage.getItem(FAMILY_CODE_KEY) || "";
-        const rememberedParentName = localStorage.getItem(PARENT_NAME_KEY) || "";
+        const role = selectedRole;
         if (!selectedRole) {
           notice = "Сначала выберите роль.";
           render();
@@ -1971,82 +2268,7 @@
           render();
           return;
         }
-        notice = "Подключаемся к семейной базе…";
-        render();
-        const action = selectedRole === "parent" ? "parentLogin" : "childLogin";
-        const payload = selectedRole === "parent"
-          ? { familyCode, name, pin }
-          : { memberId };
-        if (selectedRole === "parent") {
-          localStorage.setItem(FAMILY_CODE_KEY, familyCode);
-          localStorage.setItem(PARENT_NAME_KEY, name);
-        }
-        apiCall(action, payload).then(async response => {
-          const draftMemberId = localStorage.getItem(SYNC_MEMBER_ID_KEY);
-          if (hasUnsyncedChanges && draftMemberId && draftMemberId !== response.memberId) {
-            throw new Error("На устройстве есть несинхронизированные изменения другого профиля. Войдите в него и отправьте изменения.");
-          }
-          currentSessionToken = response.token;
-          currentMemberId = response.memberId;
-          currentRole = response.role;
-          offlineSession = false;
-          if (hasUnsyncedChanges) {
-            currentServerVersion = Number(localStorage.getItem(SYNC_VERSION_KEY) || 0);
-          } else {
-            currentServerVersion = response.version;
-            state = { ...response.state, pin: null };
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-            hasSyncConflict = false;
-            if (selectedRole === "parent") cacheChildProfiles(response.state.members);
-          }
-          if (selectedRole === "parent") {
-            try {
-              await saveOfflinePin(pin, response.memberId);
-            } catch (error) {
-              console.error("Не удалось сохранить PIN-проверку для офлайн-входа.", error);
-            }
-          } else {
-            rememberChildProfile({ id: response.memberId, name: response.name, role: "child" });
-          }
-          persistSyncMetadata();
-          choreHistoryOpen = false;
-          paymentHistoryOpen = false;
-          notice = hasUnsyncedChanges ? "Вход выполнен. На устройстве есть несинхронизированные правки." : "";
-          render();
-        }).catch(async error => {
-          console.error("Не удалось войти в семейную Google-таблицу.", error);
-          const connectionUnavailable = error.name === "TypeError" ||
-            Number(error.httpStatus) >= 500 ||
-            /не удалось связаться|сервер не ответил/i.test(error.message);
-          let offlinePinProfile = null;
-          try {
-            const savedPins = JSON.parse(localStorage.getItem(OFFLINE_PIN_KEY) || "null");
-            const pins = Array.isArray(savedPins) ? savedPins : savedPins ? [savedPins] : [];
-            const matchingParent = state.members.find(member =>
-              member.role === "parent" && member.name.toLocaleLowerCase() === name.toLocaleLowerCase()
-            );
-            offlinePinProfile = pins.find(profile => profile.memberId === matchingParent?.id) || null;
-          } catch (storageError) {
-            console.error("Не удалось прочитать сохранённый офлайн-профиль.", storageError);
-          }
-          if (connectionUnavailable && selectedRole === "parent" &&
-              familyCode.toUpperCase() === rememberedFamilyCode.toUpperCase() &&
-              name.toLocaleLowerCase() === rememberedParentName.toLocaleLowerCase() &&
-              offlinePinProfile && await verifyOfflinePin(pin, offlinePinProfile.memberId)) {
-            const memberIdForOffline = offlinePinProfile.memberId;
-            if (startOfflineSession(memberIdForOffline, "parent", "Офлайн-вход выполнен. Изменения останутся на этом устройстве до отправки.")) {
-              render();
-              return;
-            }
-          } else if (connectionUnavailable && selectedRole === "child" &&
-              childProfiles.some(profile => profile.id === memberId) &&
-              startOfflineSession(memberId, "child", "Офлайн-вход выполнен. Изменения останутся на этом устройстве до отправки.")) {
-            render();
-            return;
-          }
-          notice = error.message;
-          render();
-        });
+        signInCloud(role, { name, familyCode, pin, memberId });
       }
 
       if (event.target.id === "member-form") {
