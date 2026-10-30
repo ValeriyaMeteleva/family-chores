@@ -163,6 +163,8 @@
     .form-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
     .hint { margin: 9px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
     .error { min-height: 20px; margin: 10px 0 0; color: var(--red); font-size: 14px; }
+    .sync-panel { margin-bottom: 22px; }
+    .sync-panel .section-heading { margin-top: 0; }
 
     .dashboard-head {
       display: flex;
@@ -384,6 +386,14 @@
     const STORAGE_KEY = "family-chores-prototype-v1";
     const LEGACY_BACKEND_URL_KEY = "family-chores-backend-url-v1";
     const API_URL_KEY = "family-chores-api-url-v2";
+    const FAMILY_CODE_KEY = "family-chores-family-code-v1";
+    const PARENT_NAME_KEY = "family-chores-parent-name-v1";
+    const CHILD_PROFILES_KEY = "family-chores-child-profiles-v1";
+    const SYNC_VERSION_KEY = "family-chores-sync-version-v1";
+    const SYNC_MEMBER_ID_KEY = "family-chores-sync-member-id-v1";
+    const SYNC_DIRTY_KEY = "family-chores-sync-dirty-v1";
+    const SYNC_CONFLICT_KEY = "family-chores-sync-conflict-v1";
+    const OFFLINE_PIN_KEY = "family-chores-offline-pin-v1";
     const THEME_KEY = "family-chores-theme-v1";
     const THEMES = {
       default: { label: "По умолчанию", color: "#eeece4" },
@@ -412,16 +422,18 @@
     let state = loadState();
     let apiUrl = localStorage.getItem(API_URL_KEY) || "";
     let cloudLoginMode = Boolean(apiUrl || localStorage.getItem(LEGACY_BACKEND_URL_KEY));
+    let hasUnsyncedChanges = localStorage.getItem(SYNC_DIRTY_KEY) === "true";
+    let hasSyncConflict = localStorage.getItem(SYNC_CONFLICT_KEY) === "true";
+    let isSyncing = false;
+    let offlineSession = false;
+    let childProfiles = loadChildProfiles();
     let currentSessionToken = "";
     let currentRole = "";
     let currentServerVersion = 0;
-    let cloudSaveQueue = Promise.resolve();
-    let cloudRefreshTimer = 0;
     let selectedRole = "";
     let currentMemberId = "";
     let addingMember = false;
     let modal = null;
-    let pendingParentAction = null;
     let choreHistoryOpen = false;
     let paymentHistoryOpen = false;
     let notice = "";
@@ -447,79 +459,103 @@
       }
     }
 
+    function loadChildProfiles() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(CHILD_PROFILES_KEY) || "[]");
+        return Array.isArray(saved) ? saved : [];
+      } catch (error) {
+        console.error("Не удалось загрузить список детских профилей.", error);
+        return [];
+      }
+    }
+
+    function cacheChildProfiles(members) {
+      childProfiles = members
+        .filter(member => member.role === "child")
+        .map(member => ({ id: member.id, name: member.name }));
+      localStorage.setItem(CHILD_PROFILES_KEY, JSON.stringify(childProfiles));
+    }
+
+    function rememberChildProfile(member) {
+      if (!member || member.role !== "child") return;
+      childProfiles = childProfiles.filter(profile => profile.id !== member.id)
+        .concat([{ id: member.id, name: member.name }]);
+      localStorage.setItem(CHILD_PROFILES_KEY, JSON.stringify(childProfiles));
+    }
+
+    function persistSyncMetadata() {
+      localStorage.setItem(SYNC_DIRTY_KEY, String(hasUnsyncedChanges));
+      localStorage.setItem(SYNC_CONFLICT_KEY, String(hasSyncConflict));
+      if (currentMemberId) localStorage.setItem(SYNC_MEMBER_ID_KEY, currentMemberId);
+      localStorage.setItem(SYNC_VERSION_KEY, String(currentServerVersion));
+    }
+
+    async function saveOfflinePin(pin, memberId) {
+      const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+      const salt = Array.from(saltBytes, byte => byte.toString(16).padStart(2, "0")).join("");
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${salt}:${pin}`));
+      const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+      const saved = JSON.parse(localStorage.getItem(OFFLINE_PIN_KEY) || "null");
+      const records = Array.isArray(saved) ? saved : saved ? [saved] : [];
+      const updated = records.filter(record => record.memberId !== memberId);
+      updated.push({ salt, hash, memberId });
+      localStorage.setItem(OFFLINE_PIN_KEY, JSON.stringify(updated));
+    }
+
+    async function verifyOfflinePin(pin, memberId) {
+      try {
+        const saved = JSON.parse(localStorage.getItem(OFFLINE_PIN_KEY) || "null");
+        const records = Array.isArray(saved) ? saved : saved ? [saved] : [];
+        const record = records.find(item => item.memberId === memberId);
+        if (!record) return false;
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${record.salt}:${pin}`));
+        const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+        return hash === record.hash;
+      } catch (error) {
+        console.error("Не удалось проверить PIN для офлайн-входа.", error);
+        return false;
+      }
+    }
+
+    function startOfflineSession(memberId, role, message) {
+      const member = state.members.find(item => item.id === memberId && item.role === role);
+      if (!member) return false;
+      if (hasUnsyncedChanges && localStorage.getItem(SYNC_MEMBER_ID_KEY) !== memberId) {
+        notice = "На устройстве есть несинхронизированные правки другого профиля. Сначала войдите в него и отправьте изменения.";
+        return false;
+      }
+      currentSessionToken = "";
+      currentMemberId = member.id;
+      currentRole = member.role;
+      currentServerVersion = Number(localStorage.getItem(SYNC_VERSION_KEY) || 0);
+      offlineSession = true;
+      cloudLoginMode = true;
+      selectedRole = role;
+      notice = message;
+      return true;
+    }
+
     function verifyParentPin(pin) {
       if (currentSessionToken) return apiCall("verifyPin", { token: currentSessionToken, pin });
+      if (offlineSession) {
+        return verifyOfflinePin(pin, currentMemberId)
+          .then(verified => verified
+            ? { verified: true }
+            : Promise.reject(new Error("PIN не подошёл.")));
+      }
       return pin === state.pin
         ? Promise.resolve({ verified: true })
         : Promise.reject(new Error("PIN не подошёл."));
     }
 
-    function startCloudRefresh() {
-      window.clearInterval(cloudRefreshTimer);
-      cloudRefreshTimer = window.setInterval(async () => {
-        const token = currentSessionToken;
-        const activeElement = document.activeElement;
-        if (!token || modal || document.querySelector(".modal") || activeElement?.matches("input, textarea, select")) return;
-        try {
-          await cloudSaveQueue;
-          if (currentSessionToken !== token) return;
-          const response = await apiCall("readState", { token });
-          if (currentSessionToken !== token) return;
-          currentServerVersion = response.version;
-          state = { ...response.state, pin: null };
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-          render();
-        } catch (error) {
-          console.error("Не удалось обновить данные из Google Таблицы.", error);
-          if (/Сеанс истёк/.test(error.message) && currentSessionToken === token) {
-            currentSessionToken = "";
-            currentRole = "";
-            currentServerVersion = 0;
-            currentMemberId = "";
-            notice = "Сеанс истёк. Войдите в семейный профиль ещё раз.";
-            render();
-          }
-        }
-      }, 15000);
-    }
-
-    function saveState(parentPin = "") {
+    function saveState() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-      if (!currentSessionToken) return Promise.resolve();
-
-      const snapshot = structuredClone(state);
-      const token = currentSessionToken;
-      cloudSaveQueue = cloudSaveQueue.then(async () => {
-        try {
-          const response = await apiCall("syncState", {
-            token,
-            pin: parentPin,
-            version: currentServerVersion,
-            state: snapshot
-          });
-          if (currentSessionToken !== token) return;
-          currentServerVersion = response.version;
-          state = { ...response.state, pin: null };
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-          notice = "";
-          render();
-        } catch (error) {
-          console.error("Не удалось сохранить данные в Google Таблицу.", error);
-          if (currentSessionToken === token) {
-            try {
-              const latest = await apiCall("readState", { token });
-              currentServerVersion = latest.version;
-              state = { ...latest.state, pin: null };
-              localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-            } catch (readError) {
-              console.error("Не удалось перечитать данные из Google Таблицы.", readError);
-            }
-            notice = `Не удалось сохранить изменения: ${error.message}`;
-            render();
-          }
-        }
-      });
-      return cloudSaveQueue;
+      if (currentSessionToken || offlineSession) {
+        hasUnsyncedChanges = true;
+        hasSyncConflict = false;
+        persistSyncMetadata();
+      }
+      return Promise.resolve();
     }
 
     function setApiUrl(value) {
@@ -558,7 +594,9 @@
           throw new Error("Прокси вернул некорректный ответ. Проверьте публикацию Cloudflare Worker.");
         }
         if (!response.ok || !result || result.ok !== true) {
-          throw new Error(String(result?.error || `Ошибка сервера (HTTP ${response.status}).`));
+          const error = new Error(String(result?.error || `Ошибка сервера (HTTP ${response.status}).`));
+          error.httpStatus = response.status;
+          throw error;
         }
         return result.result;
       } catch (error) {
@@ -572,6 +610,125 @@
       } finally {
         window.clearTimeout(timeout);
       }
+    }
+
+    async function sendCloudChanges() {
+      if (!currentSessionToken || !hasUnsyncedChanges || isSyncing) return;
+      isSyncing = true;
+      notice = "Отправляем изменения в семейную базу…";
+      render();
+      const token = currentSessionToken;
+      try {
+        const response = await apiCall("syncState", {
+          token,
+          version: currentServerVersion,
+          state: { ...structuredClone(state), pin: null }
+        });
+        if (currentSessionToken !== token) return;
+        currentServerVersion = response.version;
+        state = { ...response.state, pin: null };
+        hasUnsyncedChanges = false;
+        hasSyncConflict = false;
+        if (currentRole === "parent") cacheChildProfiles(state.members);
+        else rememberChildProfile(state.members.find(member => member.id === currentMemberId));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        persistSyncMetadata();
+        notice = "Изменения отправлены в семейную базу.";
+      } catch (error) {
+        console.error("Не удалось отправить изменения в семейную базу.", error);
+        if (/Данные уже изменились на другом устройстве/i.test(error.message)) {
+          hasSyncConflict = true;
+          persistSyncMetadata();
+          notice = "Семейная база изменилась после последней загрузки. Ваши правки сохранены на устройстве; выберите, как поступить с конфликтом.";
+        } else if (/Сеанс истёк/i.test(error.message)) {
+          currentSessionToken = "";
+          offlineSession = true;
+          notice = "Сеанс сервера истёк. Ваши правки остались на устройстве. Подключитесь к интернету и войдите снова для синхронизации.";
+        } else {
+          notice = `Не удалось отправить изменения: ${error.message}`;
+        }
+      } finally {
+        isSyncing = false;
+        render();
+      }
+    }
+
+    function downloadLocalBackup() {
+      const backup = new Blob([JSON.stringify({
+        exportedAt: new Date().toISOString(),
+        memberId: currentMemberId,
+        state
+      }, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(backup);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `family-chores-local-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    async function receiveCloudChanges(discardLocalChanges = false) {
+      if (!currentSessionToken || isSyncing) return;
+      if (hasUnsyncedChanges && !discardLocalChanges) {
+        notice = hasSyncConflict
+          ? "Есть конфликт. Скачайте резервную копию и примите семейную версию, либо оставьте локальные правки."
+          : "Сначала отправьте локальные изменения. Загрузка семейных данных заменит текущее состояние.";
+        render();
+        return;
+      }
+      if (discardLocalChanges) {
+        const accepted = window.confirm("Сначала будет скачана резервная копия ваших локальных правок. Затем текущие данные заменятся семейной версией. Продолжить?");
+        if (!accepted) return;
+        downloadLocalBackup();
+      }
+      isSyncing = true;
+      notice = "Загружаем семейные изменения…";
+      render();
+      const token = currentSessionToken;
+      try {
+        const response = await apiCall("readState", { token });
+        if (currentSessionToken !== token) return;
+        currentServerVersion = response.version;
+        state = { ...response.state, pin: null };
+        hasUnsyncedChanges = false;
+        hasSyncConflict = false;
+        if (currentRole === "parent") cacheChildProfiles(state.members);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        persistSyncMetadata();
+        notice = "Семейные изменения приняты.";
+      } catch (error) {
+        console.error("Не удалось загрузить семейные изменения.", error);
+        if (/Сеанс истёк/i.test(error.message)) {
+          currentSessionToken = "";
+          offlineSession = true;
+          notice = "Сеанс сервера истёк. Ваши локальные данные сохранены. Войдите снова для загрузки семейных изменений.";
+        } else {
+          notice = `Не удалось загрузить изменения: ${error.message}`;
+        }
+      } finally {
+        isSyncing = false;
+        render();
+      }
+    }
+
+    async function refreshChildProfiles() {
+      if (!apiUrl) return;
+      const cachedProfiles = childProfiles;
+      notice = "Загружаем список детских профилей…";
+      render();
+      try {
+        const response = await apiCall("listChildProfiles", {});
+        childProfiles = response.members;
+        localStorage.setItem(CHILD_PROFILES_KEY, JSON.stringify(childProfiles));
+        notice = "";
+      } catch (error) {
+        console.error("Не удалось загрузить список детских профилей.", error);
+        childProfiles = cachedProfiles;
+        notice = childProfiles.length
+          ? "Нет соединения. Показаны сохранённые на этом устройстве профили."
+          : `Не удалось загрузить список детей: ${error.message}`;
+      }
+      render();
     }
 
     function escapeHtml(value) {
@@ -730,11 +887,49 @@
       `;
     }
 
+    function renderSyncPanel() {
+      if (!currentSessionToken && !offlineSession) return "";
+      const actionsDisabled = !currentSessionToken || isSyncing;
+      const localChanges = hasUnsyncedChanges;
+      const status = isSyncing
+        ? "Выполняется синхронизация…"
+        : localChanges
+          ? "Есть изменения только на этом устройстве."
+          : "Локальных изменений для отправки нет.";
+      return `
+        <section class="panel sync-panel" aria-label="Ручная синхронизация">
+          <div class="section-heading"><h2>Синхронизация</h2><span class="section-note">${escapeHtml(status)}</span></div>
+          <p class="hint">Отправка передаёт ваши изменения в семейную базу. Принятие загружает изменения семьи на это устройство.</p>
+          <div class="form-actions">
+            <button type="button" class="button" data-sync-send ${actionsDisabled || !localChanges ? "disabled" : ""}>Отправить изменения</button>
+            <button type="button" class="button secondary" data-sync-receive ${actionsDisabled || localChanges ? "disabled" : ""}>Принять изменения</button>
+            ${hasSyncConflict && currentSessionToken ? `<button type="button" class="button danger" data-sync-conflict>Скачать копию и принять семейные</button>` : ""}
+            ${offlineSession ? `<button type="button" class="button secondary" data-connect-online>Подключиться для обмена</button>` : ""}
+          </div>
+          ${hasSyncConflict ? `<p class="error">Версии разошлись. Локальные правки не перезаписаны. Чтобы принять семейную версию, сначала скачайте резервную копию.</p>` : ""}
+        </section>
+      `;
+    }
+
     function render() {
       const app = document.getElementById("app");
       document.querySelector(".demo-badge").textContent = currentSessionToken
         ? "Подключено к семейной Google-таблице"
-        : "Прототип · данные пока только на этом устройстве";
+        : offlineSession
+          ? "Офлайн · изменения пока только на этом устройстве"
+          : "Прототип · данные пока только на этом устройстве";
+      if (offlineSession) {
+        const member = state.members.find(item => item.id === currentMemberId);
+        if (!member) {
+          offlineSession = false;
+          currentMemberId = "";
+          selectedRole = "";
+          showPage(app, renderCloudLogin());
+          return;
+        }
+        showPage(app, member.role === "parent" ? renderParent(member) : renderChild(member));
+        return;
+      }
       if (cloudLoginMode || currentSessionToken) {
         if (!currentSessionToken) {
           showPage(app, renderCloudLogin());
@@ -775,28 +970,42 @@
             <button type="button" class="role-option" data-role="parent" aria-pressed="${parent}">Родитель</button>
           </div>
           <form id="cloud-login-form">
-            <div class="field">
-              <label for="family-code">Семейный код</label>
-              <input id="family-code" name="familyCode" maxlength="40" autocomplete="off" required>
-            </div>
             ${parent ? `
+              <div class="field">
+                <label for="family-code">Семейный код</label>
+                <input id="family-code" name="familyCode" maxlength="40" value="${escapeHtml(localStorage.getItem(FAMILY_CODE_KEY) || "")}" autocomplete="off" required>
+              </div>
+            ` : ""}
+            ${parent || !apiUrl ? `
               <div class="field">
                 <label for="api-url">Адрес Cloudflare Worker</label>
                 <input id="api-url" name="apiUrl" type="url" value="${escapeHtml(apiUrl)}" placeholder="https://family-chores.account.workers.dev" required>
+                ${child ? `<button type="button" class="button secondary small" data-configure-api>Подключить и загрузить список</button>` : ""}
               </div>
             ` : ""}
             ${parent ? `
-              <div class="field"><label for="parent-name">Ваше имя</label><input id="parent-name" name="name" maxlength="40" autocomplete="name" required></div>
+              <div class="field"><label for="parent-name">Ваше имя</label><input id="parent-name" name="name" maxlength="40" value="${escapeHtml(localStorage.getItem(PARENT_NAME_KEY) || "")}" autocomplete="name" required></div>
               <div class="field"><label for="parent-pin-login">Четырёхзначный PIN родителей</label><input id="parent-pin-login" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required></div>
             ` : ""}
-            ${child ? `<div class="field"><label for="child-invite-code">Личный код входа ребёнка</label><input id="child-invite-code" name="inviteCode" maxlength="80" autocomplete="off" required><span class="hint">Его выдаёт родителю приложение при создании профиля ребёнка. Имя само по себе не защищает вход.</span></div>` : ""}
-            ${parent && apiUrl ? `<p class="hint">Адрес сохранён на этом устройстве. Здесь его можно изменить.</p>` : ""}
-            ${child && !apiUrl ? `<p class="hint">Семейная база ещё не настроена на этом устройстве. Попросите родителя подключить её.</p>` : ""}
+            ${child ? `
+              <div class="field">
+                <label for="child-account">Профиль ребёнка</label>
+                <select id="child-account" name="memberId" required ${childProfiles.length ? "" : "disabled"}>
+                  ${childProfiles.length
+                    ? childProfiles.map(profile => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.name)}</option>`).join("")
+                    : `<option value="">${apiUrl ? "Список загружается или пока пуст" : "Сначала укажите адрес Worker"}</option>`}
+                </select>
+                ${apiUrl ? `<button type="button" class="button secondary small" data-refresh-child-profiles>Обновить список детей</button>` : ""}
+              </div>
+            ` : ""}
+            ${parent && apiUrl ? `<p class="hint">Адрес Worker сохранён на этом устройстве.</p>` : ""}
+            ${child && !apiUrl ? `<p class="hint">Семейная база ещё не настроена на этом устройстве. Попросите родителя указать адрес Worker.</p>` : ""}
+            ${child ? `<p class="hint">Личный код ребёнка не требуется. Любой, кто откроет это приложение на семейном устройстве, сможет выбрать детский профиль.</p>` : ""}
             <p class="error" id="form-error">${escapeHtml(notice || (selectedRole ? "" : "Сначала выберите роль."))}</p>
-            <div class="form-actions"><button class="button" type="submit" ${selectedRole && (parent || Boolean(apiUrl)) ? "" : "disabled"}>Войти</button></div>
+            <div class="form-actions"><button class="button" type="submit" ${selectedRole && (parent || Boolean(apiUrl && childProfiles.length)) ? "" : "disabled"}>Войти</button></div>
           </form>
         </section>
-        ${selectedRole === "parent" ? `<div class="disclaimer">Подключение семейной базы настраивается родителем. Адрес Cloudflare Worker сохранится на этом устройстве; детям он не показывается.</div>` : ""}
+        ${selectedRole === "parent" ? `<div class="disclaimer">Семейный код и имя запоминаются на этом устройстве; PIN не сохраняется. После входа изменения не отправляются автоматически — используйте кнопки синхронизации.</div>` : ""}
         <div class="form-actions"><button class="button secondary small" type="button" id="offline-mode">Вернуться к локальному прототипу</button></div>
       `;
     }
@@ -1010,6 +1219,7 @@
               <p class="intro">${escapeHtml(task.title)} · ${money(task.price)}</p>
               <p class="hint">Дело исчезнет из списка. Уже отправленные заявки и история сохранятся.</p>
               <form id="delete-task-form">
+                <div class="field"><label for="delete-task-pin">PIN родителей</label><input id="delete-task-pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required></div>
                 <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
                 <div class="form-actions"><button class="button danger" type="submit">Удалить</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
               </form>
@@ -1028,24 +1238,8 @@
               ${request.comment ? `<p class="request-comment">Комментарий ребёнка: «${escapeHtml(request.comment)}»</p>` : ""}
               <form id="review-form">
                 ${modal.status === "rejected" ? `<div class="field"><label for="parent-comment">Комментарий ребёнку (необязательно)</label><textarea id="parent-comment" name="parentComment" maxlength="500"></textarea></div>` : ""}
-                <div class="field"><label for="review-pin">PIN родителей</label><input id="review-pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required></div>
                 <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
                 <div class="form-actions"><button class="button ${modal.status === "rejected" ? "danger" : ""}" type="submit">${modal.status === "approved" ? "Подтвердить" : "Отклонить"}</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
-              </form>
-            </section>
-          </div>
-        `;
-      }
-      if (modal.type === "parent-pin") {
-        return `
-          <div class="modal" role="presentation">
-            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-              <h2 id="modal-title">Подтвердите действие</h2>
-              <p class="intro">Введите четырёхзначный PIN родителей.</p>
-              <form id="parent-pin-form">
-                <div class="field"><label for="action-pin">PIN родителей</label><input id="action-pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required></div>
-                <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
-                <div class="form-actions"><button class="button" type="submit">Продолжить</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
               </form>
             </section>
           </div>
@@ -1111,14 +1305,49 @@
         return `
           <div class="modal" role="presentation">
             <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-              <h2 id="modal-title">Добавить участника</h2>
-              <p class="intro">Для ребёнка будет создан личный код входа.</p>
+              <h2 id="modal-title">Добавить ребёнка</h2>
+              <p class="intro">Профиль появится на остальных устройствах после отправки изменений.</p>
               <form id="member-form">
                 <div class="field"><label for="new-member-name">Имя</label><input id="new-member-name" name="name" maxlength="40" required></div>
-                <div class="field"><label for="new-member-role">Роль</label><select id="new-member-role" name="role"><option value="child">Ребёнок</option><option value="parent">Родитель</option></select></div>
-                <div class="field"><label for="member-pin">PIN родителей</label><input id="member-pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required></div>
+                <input type="hidden" name="role" value="child">
                 <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
                 <div class="form-actions"><button class="button" type="submit">Создать профиль</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
+              </form>
+            </section>
+          </div>
+        `;
+      }
+      if (modal.type === "edit-member") {
+        const member = state.members.find(item => item.id === modal.memberId && item.role === "child");
+        if (!member) return "";
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">Изменить профиль ребёнка</h2>
+              <form id="edit-member-form">
+                <div class="field"><label for="edit-member-name">Имя</label><input id="edit-member-name" name="name" maxlength="40" value="${escapeHtml(member.name)}" required></div>
+                <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
+                <div class="form-actions"><button class="button" type="submit">Сохранить</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
+              </form>
+            </section>
+          </div>
+        `;
+      }
+      if (modal.type === "delete-member") {
+        const member = state.members.find(item => item.id === modal.memberId && item.role === "child");
+        if (!member) return "";
+        const recordCount = state.requests.filter(item => item.memberId === member.id).length +
+          state.payments.filter(item => item.memberId === member.id).length +
+          state.savingsRequests.filter(item => item.memberId === member.id).length;
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">Удалить профиль «${escapeHtml(member.name)}»?</h2>
+              <p class="intro">Удаление необратимо. Будут удалены профиль, баланс, накопления, долг и история (${recordCount} записей). Дела, доступные только этому ребёнку, станут доступны всем детям.</p>
+              <form id="delete-member-form">
+                <div class="field"><label for="delete-member-pin">PIN родителей</label><input id="delete-member-pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" type="password" required></div>
+                <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
+                <div class="form-actions"><button type="submit" class="button danger">Удалить профиль и историю</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
               </form>
             </section>
           </div>
@@ -1141,7 +1370,7 @@
 
     function renderSetup() {
       const parentsFull = state.members.filter(member => member.role === "parent").length >= 2;
-      const childrenFull = state.members.filter(member => member.role === "child").length >= 2;
+      const childrenFull = state.members.filter(member => member.role === "child").length >= 10;
       return `
         <p class="eyebrow">Семейный помощник</p>
         <h1>${addingMember ? "Добавим участника" : "Начнём знакомство"}</h1>
@@ -1159,13 +1388,13 @@
             <div id="pin-field" class="field ${selectedRole === "parent" && (!state.pin || addingMember) ? "" : "hidden"}">
               <label for="parent-pin">${addingMember && state.pin ? "Введите текущий PIN родителей" : "Придумайте общий PIN родителей"}</label>
               <input id="parent-pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="4 цифры" ${selectedRole === "parent" && (!state.pin || addingMember) ? "required" : ""}>
-              ${!addingMember && !state.pin ? `<p class="hint">Оба родителя будут использовать этот код для подтверждения дел и редактирования.</p>` : ""}
+              ${!addingMember && !state.pin ? `<p class="hint">Родительский PIN понадобится при входе в профиль родителя.</p>` : ""}
             </div>
             <p class="error" id="form-error">${escapeHtml(notice)}</p>
             <div class="form-actions"><button class="button" type="submit">Продолжить</button></div>
           </form>
         </section>
-        <div class="disclaimer">Локальный прототип хранит данные только в этом браузере.</div>
+        <div class="disclaimer">Локальный прототип хранит данные только в этом браузере. Можно создать до 10 детских профилей.</div>
       `;
     }
 
@@ -1236,6 +1465,7 @@
             <button type="button" class="button secondary small" id="switch-profile">Сменить профиль</button>
           </div>
         </div>
+        ${renderSyncPanel()}
         <section class="balance-card">
           <div>
             <div class="balance-topline">
@@ -1315,6 +1545,8 @@
           </div>
           <div class="member-controls">
             <span class="member-balance">${money(memberBalance(child.id))}</span>
+            <button type="button" class="button secondary small" data-edit-member="${escapeHtml(child.id)}">Изменить имя</button>
+            <button type="button" class="button danger small" data-delete-member="${escapeHtml(child.id)}">Удалить</button>
             ${Number(fundForMember(child.id).debtTarget) > 0 || Number(fundForMember(child.id).debtRemaining) > 0
               ? `<button type="button" class="button secondary small" data-manage-debt="${escapeHtml(child.id)}">Изменить долг</button>`
               : ""}
@@ -1343,6 +1575,7 @@
             <button type="button" class="button secondary small" id="switch-profile">Сменить профиль</button>
           </div>
         </div>
+        ${renderSyncPanel()}
         ${!currentSessionToken ? `
           <section class="panel" style="margin-bottom:14px">
             <p class="intro">Общая Google-таблица нужна, чтобы дела, заявки, балансы и история были одинаковыми на устройствах родителей и детей. Подключение настраивает родитель.</p>
@@ -1365,16 +1598,10 @@
             <div class="field"><label for="task-price">Цена, ₽</label><input id="task-price" name="price" type="number" min="0.01" max="100000" step="0.01" required></div>
             <div class="field"><label for="task-child">Кому видно</label><select id="task-child" name="visibleTo"><option value="">Всем детям</option>${state.members.filter(child => child.role === "child").map(child => `<option value="${escapeHtml(child.id)}">${escapeHtml(child.name)}</option>`).join("")}</select></div>
             <p class="error" id="form-error">${escapeHtml(notice)}</p>
-            <div class="form-actions"><button class="button" type="submit">Добавить дело</button><button class="button secondary" type="button" id="add-member">Добавить участника</button></div>
+            <div class="form-actions"><button class="button" type="submit">Добавить дело</button><button class="button secondary" type="button" id="add-member" ${state.members.filter(item => item.role === "child").length >= 10 ? "disabled" : ""}>Добавить ребёнка</button></div>
           </form>
         </section>
       `;
-    }
-
-    function openParentAction(action) {
-      pendingParentAction = action;
-      modal = { type: "parent-pin" };
-      render();
     }
 
     document.addEventListener("toggle", event => {
@@ -1390,7 +1617,49 @@
         ) || state.savingsRequests.some(request =>
           request.memberId === activeMember.id && request.status === "awaiting_child_confirmation"
         ));
-      if (paymentConfirmationRequired && !event.target.closest("#payment-confirmation-form")) return;
+      if (paymentConfirmationRequired &&
+          !event.target.closest("#payment-confirmation-form, [data-sync-send], [data-sync-receive], [data-sync-conflict], [data-connect-online]")) return;
+
+      if (event.target.closest("[data-sync-send]")) {
+        sendCloudChanges();
+        return;
+      }
+
+      if (event.target.closest("[data-sync-receive]")) {
+        receiveCloudChanges();
+        return;
+      }
+
+      if (event.target.closest("[data-sync-conflict]")) {
+        receiveCloudChanges(true);
+        return;
+      }
+
+      if (event.target.closest("[data-connect-online]")) {
+        offlineSession = false;
+        currentMemberId = "";
+        selectedRole = currentRole;
+        notice = "";
+        render();
+        return;
+      }
+
+      if (event.target.closest("[data-configure-api]")) {
+        try {
+          setApiUrl(document.getElementById("api-url").value);
+          notice = "";
+          refreshChildProfiles();
+        } catch (error) {
+          notice = error.message;
+          render();
+        }
+        return;
+      }
+
+      if (event.target.closest("[data-refresh-child-profiles]")) {
+        refreshChildProfiles();
+        return;
+      }
 
       if (event.target.closest("#cloud-connect")) {
         cloudLoginMode = true;
@@ -1401,9 +1670,14 @@
       }
 
       if (event.target.closest("#offline-mode")) {
-        window.clearInterval(cloudRefreshTimer);
+        if (hasUnsyncedChanges) {
+          notice = "Сначала отправьте локальные изменения или завершите конфликт синхронизации.";
+          render();
+          return;
+        }
         cloudLoginMode = false;
         currentSessionToken = "";
+        offlineSession = false;
         currentMemberId = "";
         currentRole = "";
         currentServerVersion = 0;
@@ -1417,19 +1691,27 @@
         selectedRole = roleButton.dataset.role;
         notice = "";
         render();
+        if (selectedRole === "child" && apiUrl) refreshChildProfiles();
         return;
       }
 
       if (event.target.closest("#switch-profile")) {
-        window.clearInterval(cloudRefreshTimer);
+        if (hasUnsyncedChanges && !offlineSession) {
+          notice = "Сначала отправьте локальные изменения, чтобы не потерять их при смене профиля.";
+          render();
+          return;
+        }
+        const previousRole = currentRole;
         currentSessionToken = "";
-        currentRole = "";
+        offlineSession = false;
         currentMemberId = "";
+        selectedRole = previousRole;
         modal = null;
         choreHistoryOpen = false;
         paymentHistoryOpen = false;
         notice = "";
         render();
+        if (selectedRole === "child" && apiUrl) refreshChildProfiles();
         return;
       }
 
@@ -1449,6 +1731,20 @@
       const deleteTaskButton = event.target.closest("[data-delete-task]");
       if (deleteTaskButton) {
         modal = { type: "delete-task", taskId: deleteTaskButton.dataset.deleteTask, error: "" };
+        render();
+        return;
+      }
+
+      const editMemberButton = event.target.closest("[data-edit-member]");
+      if (editMemberButton) {
+        modal = { type: "edit-member", memberId: editMemberButton.dataset.editMember, error: "" };
+        render();
+        return;
+      }
+
+      const deleteMemberButton = event.target.closest("[data-delete-member]");
+      if (deleteMemberButton) {
+        modal = { type: "delete-member", memberId: deleteMemberButton.dataset.deleteMember, error: "" };
         render();
         return;
       }
@@ -1496,7 +1792,12 @@
       }
 
       if (event.target.closest("#add-member")) {
-        if (currentSessionToken && currentRole === "parent") {
+        if ((currentSessionToken || offlineSession) && currentRole === "parent") {
+          if (state.members.filter(item => item.role === "child").length >= 10) {
+            notice = "Можно создать не более 10 детских профилей.";
+            render();
+            return;
+          }
           modal = { type: "member", error: "" };
           render();
           return;
@@ -1509,6 +1810,11 @@
         paymentHistoryOpen = false;
         notice = "";
         render();
+        return;
+      }
+
+      if (event.target.closest("[data-download-local-backup]")) {
+        downloadLocalBackup();
         return;
       }
 
@@ -1526,7 +1832,6 @@
 
       if (event.target.closest("[data-close-modal]")) {
         modal = null;
-        pendingParentAction = null;
         render();
         return;
       }
@@ -1616,8 +1921,9 @@
           render();
           return;
         }
-        if (state.members.filter(member => member.role === selectedRole).length >= 2) {
-          notice = `В семье уже добавлены два участника с ролью «${selectedRole === "parent" ? "родитель" : "ребёнок"}».`;
+        const roleLimit = selectedRole === "parent" ? 2 : 10;
+        if (state.members.filter(member => member.role === selectedRole).length >= roleLimit) {
+          notice = `В семье достигнут лимит профилей: ${roleLimit}.`;
           render();
           return;
         }
@@ -1644,13 +1950,15 @@
         const name = String(form.get("name") || "").trim();
         const familyCode = String(form.get("familyCode") || "").trim();
         const pin = String(form.get("pin") || "");
-        const inviteCode = String(form.get("inviteCode") || "").trim();
+        const memberId = String(form.get("memberId") || "");
+        const rememberedFamilyCode = localStorage.getItem(FAMILY_CODE_KEY) || "";
+        const rememberedParentName = localStorage.getItem(PARENT_NAME_KEY) || "";
         if (!selectedRole) {
           notice = "Сначала выберите роль.";
           render();
           return;
         }
-        if (selectedRole === "parent" && form.has("apiUrl")) {
+        if (form.has("apiUrl")) {
           try {
             setApiUrl(form.get("apiUrl"));
           } catch (error) {
@@ -1665,25 +1973,77 @@
         }
         notice = "Подключаемся к семейной базе…";
         render();
-        apiCall(selectedRole === "parent" ? "parentLogin" : "childLogin", {
-          familyCode,
-          name,
-          pin,
-          inviteCode
-        }).then(response => {
+        const action = selectedRole === "parent" ? "parentLogin" : "childLogin";
+        const payload = selectedRole === "parent"
+          ? { familyCode, name, pin }
+          : { memberId };
+        if (selectedRole === "parent") {
+          localStorage.setItem(FAMILY_CODE_KEY, familyCode);
+          localStorage.setItem(PARENT_NAME_KEY, name);
+        }
+        apiCall(action, payload).then(async response => {
+          const draftMemberId = localStorage.getItem(SYNC_MEMBER_ID_KEY);
+          if (hasUnsyncedChanges && draftMemberId && draftMemberId !== response.memberId) {
+            throw new Error("На устройстве есть несинхронизированные изменения другого профиля. Войдите в него и отправьте изменения.");
+          }
           currentSessionToken = response.token;
           currentMemberId = response.memberId;
           currentRole = response.role;
-          currentServerVersion = response.version;
-          state = { ...response.state, pin: null };
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-          startCloudRefresh();
+          offlineSession = false;
+          if (hasUnsyncedChanges) {
+            currentServerVersion = Number(localStorage.getItem(SYNC_VERSION_KEY) || 0);
+          } else {
+            currentServerVersion = response.version;
+            state = { ...response.state, pin: null };
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+            hasSyncConflict = false;
+            if (selectedRole === "parent") cacheChildProfiles(response.state.members);
+          }
+          if (selectedRole === "parent") {
+            try {
+              await saveOfflinePin(pin, response.memberId);
+            } catch (error) {
+              console.error("Не удалось сохранить PIN-проверку для офлайн-входа.", error);
+            }
+          } else {
+            rememberChildProfile({ id: response.memberId, name: response.name, role: "child" });
+          }
+          persistSyncMetadata();
           choreHistoryOpen = false;
           paymentHistoryOpen = false;
-          notice = "";
+          notice = hasUnsyncedChanges ? "Вход выполнен. На устройстве есть несинхронизированные правки." : "";
           render();
-        }).catch(error => {
+        }).catch(async error => {
           console.error("Не удалось войти в семейную Google-таблицу.", error);
+          const connectionUnavailable = error.name === "TypeError" ||
+            Number(error.httpStatus) >= 500 ||
+            /не удалось связаться|сервер не ответил/i.test(error.message);
+          let offlinePinProfile = null;
+          try {
+            const savedPins = JSON.parse(localStorage.getItem(OFFLINE_PIN_KEY) || "null");
+            const pins = Array.isArray(savedPins) ? savedPins : savedPins ? [savedPins] : [];
+            const matchingParent = state.members.find(member =>
+              member.role === "parent" && member.name.toLocaleLowerCase() === name.toLocaleLowerCase()
+            );
+            offlinePinProfile = pins.find(profile => profile.memberId === matchingParent?.id) || null;
+          } catch (storageError) {
+            console.error("Не удалось прочитать сохранённый офлайн-профиль.", storageError);
+          }
+          if (connectionUnavailable && selectedRole === "parent" &&
+              familyCode.toUpperCase() === rememberedFamilyCode.toUpperCase() &&
+              name.toLocaleLowerCase() === rememberedParentName.toLocaleLowerCase() &&
+              offlinePinProfile && await verifyOfflinePin(pin, offlinePinProfile.memberId)) {
+            const memberIdForOffline = offlinePinProfile.memberId;
+            if (startOfflineSession(memberIdForOffline, "parent", "Офлайн-вход выполнен. Изменения останутся на этом устройстве до отправки.")) {
+              render();
+              return;
+            }
+          } else if (connectionUnavailable && selectedRole === "child" &&
+              childProfiles.some(profile => profile.id === memberId) &&
+              startOfflineSession(memberId, "child", "Офлайн-вход выполнен. Изменения останутся на этом устройстве до отправки.")) {
+            render();
+            return;
+          }
           notice = error.message;
           render();
         });
@@ -1693,22 +2053,39 @@
         event.preventDefault();
         const form = new FormData(event.target);
         const name = String(form.get("name") || "").trim();
-        const role = String(form.get("role") || "");
-        const pin = String(form.get("pin") || "");
-        apiCall("addMember", { token: currentSessionToken, name, role, pin }).then(response => {
-          state = { ...response.state, pin: null };
-          currentServerVersion = response.version;
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-          modal = response.inviteCode
-            ? { type: "invite-code", inviteCode: response.inviteCode }
-            : null;
-          notice = "";
-          render();
-        }).catch(error => {
-          console.error("Не удалось добавить участника.", error);
-          if (modal) modal.error = error.message;
-          render();
-        });
+        if (!name) {
+          document.getElementById("modal-error").textContent = "Введите имя профиля.";
+          return;
+        }
+        if (state.members.filter(item => item.role === "child").length >= 10) {
+          document.getElementById("modal-error").textContent = "Можно создать не более 10 детских профилей.";
+          return;
+        }
+        const member = { id: crypto.randomUUID(), name: name.slice(0, 40), role: "child" };
+        state.members.push(member);
+        state.funds.push(emptyFund(member.id));
+        cacheChildProfiles(state.members);
+        modal = null;
+        notice = "Профиль добавлен на этом устройстве. Отправьте изменения, чтобы он появился на остальных.";
+        saveState();
+        render();
+      }
+
+      if (event.target.id === "edit-member-form") {
+        event.preventDefault();
+        const name = String(new FormData(event.target).get("name") || "").trim();
+        if (!name) {
+          document.getElementById("modal-error").textContent = "Введите имя профиля.";
+          return;
+        }
+        const member = state.members.find(item => item.id === modal.memberId && item.role === "child");
+        if (!member) return;
+        member.name = name.slice(0, 40);
+        cacheChildProfiles(state.members);
+        modal = null;
+        notice = "Имя изменено на этом устройстве. Отправьте изменения, чтобы обновить семейную базу.";
+        saveState();
+        render();
       }
 
       if (event.target.id === "login-form") {
@@ -1727,16 +2104,15 @@
         const price = Number(form.get("price"));
         const visibleTo = String(form.get("visibleTo") || "");
         if (!title || !Number.isFinite(price) || price <= 0) {
-          notice = "Введите название и положительную цену.";
-          render();
+          document.getElementById("form-error").textContent = "Введите название и положительную цену.";
           return;
         }
-        openParentAction(pin => {
-          state.tasks.push({ id: crypto.randomUUID(), title: title.slice(0, 60), price, active: true, visibleTo });
-          saveState(currentSessionToken ? pin : "");
-          notice = "Дело добавлено.";
-          render();
-        });
+        state.tasks.push({ id: crypto.randomUUID(), title: title.slice(0, 60), price, active: true, visibleTo });
+        saveState();
+        notice = currentSessionToken || offlineSession
+          ? "Дело добавлено. Отправьте изменения, чтобы обновить семейную базу."
+          : "Дело добавлено.";
+        render();
       }
 
       if (event.target.id === "edit-task-form") {
@@ -1746,43 +2122,85 @@
         const price = Number(form.get("price"));
         const visibleTo = String(form.get("visibleTo") || "");
         if (!title || title.length > 60 || !Number.isFinite(price) || price <= 0 || price > 100000) {
-          modal.error = "Введите название до 60 символов и цену от 0,01 до 100 000 ₽.";
-          render();
+          document.getElementById("modal-error").textContent = "Введите название до 60 символов и цену от 0,01 до 100 000 ₽.";
           return;
         }
         const taskId = modal.taskId;
-        openParentAction(pin => {
-          const task = state.tasks.find(item => item.id === taskId);
-          if (!task) {
-            notice = "Это дело уже удалено.";
-            render();
-            return;
-          }
-          task.title = title;
-          task.price = Math.round(price * 100) / 100;
-          task.visibleTo = visibleTo;
+        const task = state.tasks.find(item => item.id === taskId);
+        if (!task) {
           modal = null;
-          saveState(currentSessionToken ? pin : "");
-          notice = "Изменения дела сохранены.";
+          notice = "Это дело уже удалено.";
           render();
-        });
+          return;
+        }
+        task.title = title;
+        task.price = Math.round(price * 100) / 100;
+        task.visibleTo = visibleTo;
+        modal = null;
+        saveState();
+        notice = "Изменения дела сохранены.";
+        render();
       }
 
       if (event.target.id === "delete-task-form") {
         event.preventDefault();
         const taskId = modal.taskId;
-        openParentAction(pin => {
+        const pin = String(new FormData(event.target).get("pin") || "");
+        const submitButton = event.target.querySelector('button[type="submit"]');
+        submitButton.disabled = true;
+        verifyParentPin(pin).then(() => {
+          if (!modal || modal.type !== "delete-task" || modal.taskId !== taskId) return;
           const taskIndex = state.tasks.findIndex(item => item.id === taskId);
           if (taskIndex === -1) {
+            modal = null;
             notice = "Это дело уже удалено.";
+          } else {
+            state.tasks.splice(taskIndex, 1);
+            modal = null;
+            saveState();
+            notice = "Дело удалено. История заявок сохранена.";
+          }
+          render();
+        }).catch(error => {
+          if (!modal || modal.type !== "delete-task" || modal.taskId !== taskId) return;
+          const errorElement = document.getElementById("modal-error");
+          if (errorElement) errorElement.textContent = error.message;
+          submitButton.disabled = false;
+        });
+      }
+
+      if (event.target.id === "delete-member-form") {
+        event.preventDefault();
+        const memberId = modal.memberId;
+        const pin = String(new FormData(event.target).get("pin") || "");
+        const submitButton = event.target.querySelector('button[type="submit"]');
+        submitButton.disabled = true;
+        verifyParentPin(pin).then(() => {
+          if (!modal || modal.type !== "delete-member" || modal.memberId !== memberId) return;
+          if (!state.members.some(member => member.id === memberId && member.role === "child")) {
+            modal = null;
+            notice = "Этот профиль уже удалён.";
             render();
             return;
           }
-          state.tasks.splice(taskIndex, 1);
+          state.members = state.members.filter(member => member.id !== memberId);
+          state.funds = state.funds.filter(fund => fund.memberId !== memberId);
+          state.requests = state.requests.filter(request => request.memberId !== memberId);
+          state.payments = state.payments.filter(payment => payment.memberId !== memberId);
+          state.savingsRequests = state.savingsRequests.filter(request => request.memberId !== memberId);
+          state.tasks.forEach(task => {
+            if (task.visibleTo === memberId) task.visibleTo = "";
+          });
+          cacheChildProfiles(state.members);
           modal = null;
-          saveState(currentSessionToken ? pin : "");
-          notice = "Дело удалено. История заявок сохранена.";
+          notice = "Профиль и его данные удалены на этом устройстве. Отправьте изменения, чтобы обновить семейную базу.";
+          saveState();
           render();
+        }).catch(error => {
+          if (!modal || modal.type !== "delete-member" || modal.memberId !== memberId) return;
+          const errorElement = document.getElementById("modal-error");
+          if (errorElement) errorElement.textContent = error.message;
+          submitButton.disabled = false;
         });
       }
 
@@ -1840,7 +2258,7 @@
             : 0;
           if (remaining > 0) fund.savingsRate = Math.min(Number(fund.savingsRate), 20);
           modal = null;
-          saveState(currentSessionToken ? pin : "");
+          saveState();
           render();
         }).catch(error => {
           if (modal) modal.error = error.message;
@@ -1904,39 +2322,20 @@
       if (event.target.id === "review-form") {
         event.preventDefault();
         const form = new FormData(event.target);
-        const pin = String(form.get("pin") || "");
-        verifyParentPin(pin).then(() => {
-          const request = state.requests.find(item => item.id === modal.requestId && item.status === "pending");
-          if (request) {
-            if (modal.status === "approved" && !currentSessionToken) {
-              applyChoreAllocation(request.memberId, request.price);
-            }
-            request.status = modal.status;
-            request.parentComment = String(form.get("parentComment") || "").trim().slice(0, 500);
-            saveState(currentSessionToken ? pin : "");
+        const request = state.requests.find(item => item.id === modal.requestId && item.status === "pending");
+        if (request) {
+          if (modal.status === "approved" && !currentSessionToken && !offlineSession) {
+            applyChoreAllocation(request.memberId, request.price);
           }
-          modal = null;
-          notice = "";
-          render();
-        }).catch(error => {
-          if (modal) modal.error = error.message;
-          render();
-        });
-      }
-
-      if (event.target.id === "parent-pin-form") {
-        event.preventDefault();
-        const pin = new FormData(event.target).get("pin");
-        const action = pendingParentAction;
-        verifyParentPin(pin).then(() => {
-          pendingParentAction = null;
-          modal = null;
-          if (action) action(pin);
-          render();
-        }).catch(error => {
-          modal.error = `${error.message} Попробуйте ещё раз.`;
-          render();
-        });
+          request.status = modal.status;
+          request.parentComment = String(form.get("parentComment") || "").trim().slice(0, 500);
+          saveState();
+        }
+        modal = null;
+        notice = currentSessionToken || offlineSession
+          ? "Решение сохранено на устройстве. Отправьте изменения, чтобы ребёнок его увидел."
+          : "";
+        render();
       }
 
       if (event.target.id === "payout-request-form") {
@@ -1989,7 +2388,7 @@
           payment.status = "awaiting_child_confirmation";
           payment.paidAt = new Date().toISOString();
           modal = null;
-          saveState(currentSessionToken ? pin : "");
+          saveState();
           render();
         }).catch(error => {
           if (modal) modal.error = error.message;
@@ -2012,7 +2411,7 @@
           request.status = "awaiting_child_confirmation";
           request.paidAt = new Date().toISOString();
           modal = null;
-          saveState(currentSessionToken ? pin : "");
+          saveState();
           render();
         }).catch(error => {
           if (modal) modal.error = error.message;
@@ -2034,7 +2433,7 @@
         verifyParentPin(pin).then(() => {
           request.status = "rejected";
           modal = null;
-          saveState(currentSessionToken ? pin : "");
+          saveState();
           render();
         }).catch(error => {
           if (modal) modal.error = error.message;
@@ -2064,8 +2463,9 @@
     });
 
     function addMember(name, role) {
-      if (state.members.filter(member => member.role === role).length >= 2) {
-        notice = `В семье уже добавлены два участника с ролью «${role === "parent" ? "родитель" : "ребёнок"}».`;
+      const limit = role === "parent" ? 2 : 10;
+      if (state.members.filter(member => member.role === role).length >= limit) {
+        notice = `В семье достигнут лимит профилей: ${limit}.`;
         render();
         return;
       }

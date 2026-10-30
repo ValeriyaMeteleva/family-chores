@@ -131,6 +131,7 @@ function apiDispatch(action, payload) {
   switch (action) {
     case "parentLogin": return parentLogin_(payload);
     case "childLogin": return childLogin_(payload);
+    case "listChildProfiles": return listChildProfiles_();
     case "readState": return readState_(payload);
     case "verifyPin": return verifyPin_(payload);
     case "syncState": return syncState_(payload);
@@ -191,6 +192,15 @@ function parentLogin_(payload) {
 }
 
 function childLogin_(payload) {
+  const memberId = cleanString_(payload.memberId, 120);
+  if (memberId) {
+    const member = readRows_(SHEETS.members).find(item =>
+      item.id === memberId && item.role === "child"
+    );
+    if (!member) throw new Error("Детский профиль не найден.");
+    return createSession_(member);
+  }
+
   const properties = PropertiesService.getScriptProperties();
   const familyCode = cleanString_(payload.familyCode, 40);
   const inviteCode = cleanString_(payload.inviteCode, 80);
@@ -208,6 +218,14 @@ function childLogin_(payload) {
   );
   if (!member) throw new Error("Код профиля ребёнка не подошёл.");
   return createSession_(member);
+}
+
+function listChildProfiles_() {
+  return {
+    members: readRows_(SHEETS.members)
+      .filter(member => member.role === "child")
+      .map(member => ({ id: member.id, name: member.name }))
+  };
 }
 
 function readState_(payload) {
@@ -237,8 +255,9 @@ function addMember_(payload) {
   lock.waitLock(10000);
   try {
     const members = readRows_(SHEETS.members);
-    if (members.filter(item => item.role === role).length >= 2) {
-      throw new Error(`В семье уже зарегистрированы два участника с ролью «${role === "parent" ? "родитель" : "ребёнок"}».`);
+    const roleLimit = role === "parent" ? 2 : 10;
+    if (members.filter(item => item.role === role).length >= roleLimit) {
+      throw new Error(`В семье достигнут лимит профилей: ${roleLimit}.`);
     }
     const inviteCode = role === "child" ? randomToken_().replace(/-/g, "").slice(0, 16).toUpperCase() : "";
     const inviteHashSalt = role === "child" ? randomToken_() : "";
@@ -265,9 +284,6 @@ function addMember_(payload) {
 
 function syncState_(payload) {
   const session = requireSession_(payload.token);
-  if (session.role === "parent" && !verifyParentPin_(payload.pin)) {
-    throw new Error("PIN не подошёл. Изменения не сохранены.");
-  }
   const candidate = payload.state;
   if (!candidate || typeof candidate !== "object") throw new Error("Нет данных для сохранения.");
   ["members", "tasks", "requests", "payments", "funds", "savingsRequests"].forEach(key => {
@@ -309,6 +325,10 @@ function syncState_(payload) {
 }
 
 function validateParentState_(current, next) {
+  if (!Array.isArray(next.members) || next.members.length > 12 ||
+      next.members.some(item => !item || typeof item !== "object")) {
+    throw new Error("Некорректный список участников.");
+  }
   if (new Set(next.members.map(item => item.id)).size !== next.members.length ||
       new Set(next.tasks.map(item => item.id)).size !== next.tasks.length ||
       new Set(next.requests.map(item => item.id)).size !== next.requests.length ||
@@ -319,12 +339,60 @@ function validateParentState_(current, next) {
   if (next.requests.some(request => typeof request.parentComment !== "string" || request.parentComment.length > 500)) {
     throw new Error("Комментарий родителя слишком длинный.");
   }
-  if (!sameJson_(current.members, next.members)) throw new Error("Изменение профилей доступно только через добавление участника.");
-  validateRows_(current.requests, next.requests, item => item.status === "pending", ["status", "parentComment"], "заявки");
-  validateRows_(current.payments, next.payments, item => item.status === "requested", ["status", "paidAt"], "выплаты");
-  validateRows_(current.savingsRequests, next.savingsRequests, item => item.status === "requested",
+  const currentParents = current.members.filter(member => member.role === "parent");
+  const nextParents = next.members.filter(member => member.role === "parent");
+  const currentChildren = current.members.filter(member => member.role === "child");
+  const nextChildren = next.members.filter(member => member.role === "child");
+  if (currentParents.length !== nextParents.length ||
+      currentParents.some(member => {
+        const candidate = nextParents.find(item => item.id === member.id);
+        return !candidate || !sameJson_(member, candidate);
+      })) {
+    throw new Error("Профили родителей нельзя менять или удалять через синхронизацию.");
+  }
+  if (nextParents.length > 2 || nextChildren.length > 10 ||
+      next.members.some(member => !member || typeof member.id !== "string" || !member.id ||
+        typeof member.name !== "string" || !member.name.trim() || member.name.length > 40 ||
+        (member.role !== "parent" && member.role !== "child"))) {
+    throw new Error("Некорректный профиль или превышен лимит участников (2 родителя и 10 детей).");
+  }
+  const nextMemberIds = new Set(next.members.map(member => member.id));
+  const currentChildIds = new Set(currentChildren.map(member => member.id));
+  const nextChildIds = new Set(nextChildren.map(member => member.id));
+  const removedChildIds = new Set(currentChildren
+    .filter(member => !nextChildIds.has(member.id))
+    .map(member => member.id));
+  const addedChildIds = new Set(nextChildren
+    .filter(member => !currentChildIds.has(member.id))
+    .map(member => member.id));
+  nextChildren.forEach(member => {
+    const previous = currentChildren.find(item => item.id === member.id);
+    if (previous && !sameExceptFields_(previous, member, ["name"])) {
+      throw new Error("В профиле ребёнка разрешено изменить только имя.");
+    }
+  });
+  if (next.funds.length !== next.members.length ||
+      next.funds.some(fund => !nextMemberIds.has(fund.memberId)) ||
+      new Set(next.funds.map(fund => fund.memberId)).size !== next.funds.length) {
+    throw new Error("У каждого участника должен быть ровно один финансовый счёт.");
+  }
+  const retainedFunds = next.funds.filter(fund => !addedChildIds.has(fund.memberId));
+  validateParentFunds_(
+    current.funds.filter(fund => !removedChildIds.has(fund.memberId)),
+    retainedFunds
+  );
+  next.funds.filter(fund => addedChildIds.has(fund.memberId)).forEach(fund => {
+    validateFundShape_(fund);
+    const empty = emptyFund_(fund.memberId);
+    if (!sameJson_(fund, empty)) throw new Error("Новый профиль должен начинаться с нулевого баланса.");
+  });
+  const retainedRequests = current.requests.filter(request => !removedChildIds.has(request.memberId));
+  const retainedPayments = current.payments.filter(payment => !removedChildIds.has(payment.memberId));
+  const retainedSavingsRequests = current.savingsRequests.filter(request => !removedChildIds.has(request.memberId));
+  validateRows_(retainedRequests, next.requests, item => item.status === "pending", ["status", "parentComment"], "заявки");
+  validateRows_(retainedPayments, next.payments, item => item.status === "requested", ["status", "paidAt"], "выплаты");
+  validateRows_(retainedSavingsRequests, next.savingsRequests, item => item.status === "requested",
     ["status", "paidAt"], "запросы накоплений");
-  validateParentFunds_(current.funds, next.funds);
 
   const existingTasks = new Map(current.tasks.map(task => [task.id, task]));
   const nextTaskIds = new Set();
@@ -336,25 +404,25 @@ function validateParentState_(current, next) {
     if (previous) {
       if (Number(task.price) < 0 || !task.title) throw new Error("Некорректные данные дела.");
     }
-    if (task.visibleTo && !current.members.some(member => member.id === task.visibleTo && member.role === "child")) {
+    if (task.visibleTo && !nextChildren.some(member => member.id === task.visibleTo)) {
       throw new Error("Для дела выбран неизвестный профиль ребёнка.");
     }
   });
-  current.requests.forEach(request => {
+  current.requests.filter(request => !removedChildIds.has(request.memberId)).forEach(request => {
     const candidate = next.requests.find(item => item.id === request.id);
     if (request.status === "pending" && candidate &&
         candidate.status !== "pending" && candidate.status !== "approved" && candidate.status !== "rejected") {
       throw new Error("Недопустимый статус заявки.");
     }
   });
-  current.payments.forEach(payment => {
+  current.payments.filter(payment => !removedChildIds.has(payment.memberId)).forEach(payment => {
     const candidate = next.payments.find(item => item.id === payment.id);
     if (payment.status === "requested" && candidate &&
         candidate.status !== "requested" && candidate.status !== "awaiting_child_confirmation") {
       throw new Error("Недопустимый статус выплаты.");
     }
   });
-  current.savingsRequests.forEach(request => {
+  current.savingsRequests.filter(request => !removedChildIds.has(request.memberId)).forEach(request => {
     const candidate = next.savingsRequests.find(item => item.id === request.id);
     if (request.status === "requested" && candidate &&
         candidate.status !== "requested" && candidate.status !== "awaiting_child_confirmation" &&
@@ -670,11 +738,31 @@ function validateTask_(task) {
 }
 
 function writeState_(state) {
+  writeMembers_(state.members);
   replaceRows_(SHEETS.tasks, state.tasks, ["id", "title", "price", "active", "visibleTo"]);
   replaceRows_(SHEETS.requests, state.requests, SHEETS.requests.headers);
   replaceRows_(SHEETS.payments, state.payments, SHEETS.payments.headers);
   replaceRows_(SHEETS.funds, state.funds, SHEETS.funds.headers);
   replaceRows_(SHEETS.savingsRequests, state.savingsRequests, SHEETS.savingsRequests.headers);
+}
+
+function writeMembers_(members) {
+  const storedMembers = new Map(readRows_(SHEETS.members).map(member => [member.id, member]));
+  const rows = members.map(member => ({
+    id: member.id,
+    name: member.name,
+    role: member.role,
+    inviteHash: storedMembers.get(member.id)?.inviteHash || ""
+  }));
+  replaceRows_(SHEETS.members, rows, SHEETS.members.headers);
+
+  const childrenSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Коды детей");
+  if (!childrenSheet || childrenSheet.getLastRow() < 2) return;
+  const activeChildIds = new Set(members.filter(member => member.role === "child").map(member => member.id));
+  const codeRows = childrenSheet.getRange(2, 1, childrenSheet.getLastRow() - 1, 3).getValues()
+    .filter(row => activeChildIds.has(row[0]));
+  childrenSheet.getRange(2, 1, childrenSheet.getLastRow() - 1, 3).clearContent();
+  if (codeRows.length) childrenSheet.getRange(2, 1, codeRows.length, 3).setValues(codeRows);
 }
 
 function readStateData_() {

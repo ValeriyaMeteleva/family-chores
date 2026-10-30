@@ -9,6 +9,7 @@ const ALLOWED_ORIGINS = new Set([
 const ALLOWED_ACTIONS = new Set([
   "parentLogin",
   "childLogin",
+  "listChildProfiles",
   "readState",
   "verifyPin",
   "syncState",
