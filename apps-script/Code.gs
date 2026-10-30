@@ -134,6 +134,7 @@ function apiDispatch(action, payload) {
     case "listChildProfiles": return listChildProfiles_();
     case "readState": return readState_(payload);
     case "verifyPin": return verifyPin_(payload);
+    case "changePin": return changeParentPin_(payload);
     case "syncState": return syncState_(payload);
     case "addMember": return addMember_(payload);
     default: throw new Error("Неизвестная операция.");
@@ -242,6 +243,32 @@ function verifyPin_(payload) {
   requireSession_(payload.token, "parent");
   if (!verifyParentPin_(payload.pin)) throw new Error("PIN не подошёл.");
   return { verified: true };
+}
+
+function changeParentPin_(payload) {
+  requireSession_(payload.token, "parent");
+  const currentPin = cleanString_(payload.currentPin, 4);
+  const newPin = cleanString_(payload.newPin, 4);
+  if (!/^\d{4}$/.test(currentPin) || !/^\d{4}$/.test(newPin)) {
+    throw new Error("Введите текущий и новый PIN из четырёх цифр.");
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    if (!verifyParentPin_(currentPin)) throw new Error("Текущий PIN не подошёл.");
+    const properties = PropertiesService.getScriptProperties();
+    const salt = randomToken_();
+    properties.setProperties({
+      [PROPERTY_KEYS.pinSalt]: salt,
+      [PROPERTY_KEYS.pinHash]: digest_(newPin, salt),
+      [PROPERTY_KEYS.failedPinCount]: "0",
+      [PROPERTY_KEYS.blockedUntil]: "0"
+    });
+    return { changed: true };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function addMember_(payload) {

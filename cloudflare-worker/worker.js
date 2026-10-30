@@ -12,6 +12,7 @@ const ALLOWED_ACTIONS = new Set([
   "listChildProfiles",
   "readState",
   "verifyPin",
+  "changePin",
   "syncState",
   "addMember"
 ]);

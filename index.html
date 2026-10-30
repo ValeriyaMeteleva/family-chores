@@ -187,12 +187,15 @@
 
     .dashboard-head {
       display: flex;
-      align-items: end;
+      align-items: center;
       justify-content: space-between;
       gap: 16px;
       margin-bottom: 22px;
     }
+    .dashboard-title-group { display: flex; align-items: center; gap: 12px; }
     .dashboard-actions { display: flex; align-items: center; gap: 8px; }
+    .dashboard-actions .icon-button { width: 56px; height: 56px; font-size: 30px; }
+    .dashboard-back { width: 48px; height: 48px; flex: 0 0 auto; }
     .icon-button {
       display: grid; width: 40px; height: 40px; place-items: center;
       border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--ink);
@@ -383,7 +386,10 @@
       .request { flex-direction: column; }
       .request-actions { width: 100%; }
       .request-actions .button { flex: 1; }
-      .dashboard-head { align-items: flex-start; flex-direction: column; }
+      .dashboard-head { align-items: center; }
+      .dashboard-title-group { min-width: 0; }
+      .dashboard-title-group h1 { font-size: clamp(25px, 7vw, 36px); }
+      .dashboard-actions { margin-left: auto; }
     }
   </style>
 </head>
@@ -450,6 +456,7 @@
     let currentSessionToken = "";
     let currentRole = "";
     let currentServerVersion = 0;
+    let loginRefreshRequired = false;
     let selectedRole = "";
     let loginSettingsOpen = false;
     let selectedLoginProfile = null;
@@ -766,6 +773,10 @@
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         persistSyncMetadata();
         notice = "Семейные изменения приняты.";
+        if (loginRefreshRequired) {
+          loginRefreshRequired = false;
+          modal = null;
+        }
       } catch (error) {
         console.error("Не удалось загрузить семейные изменения.", error);
         if (/Сеанс истёк/i.test(error.message)) {
@@ -1124,7 +1135,7 @@
             <div class="form-actions"><button class="button" type="submit" ${selectedRole && (parent || Boolean(apiUrl && childProfiles.length)) ? "" : "disabled"}>Войти</button></div>
           </form>
         </section>
-        ${selectedRole === "parent" ? `<div class="disclaimer">Семейный код и имя запоминаются на этом устройстве; PIN не сохраняется. После входа изменения не отправляются автоматически — используйте кнопки синхронизации.</div>` : ""}
+        ${selectedRole === "parent" ? `<div class="disclaimer">Семейный код и имя запоминаются на этом устройстве; PIN не сохраняется. После каждого входа нужно обновить семейные данные; локальные изменения отправляются вручную.</div>` : ""}
         <div class="form-actions"><button class="button secondary small" type="button" id="offline-mode">Вернуться к локальному прототипу</button></div>
       `;
     }
@@ -1134,6 +1145,35 @@
     }
 
     function renderModal() {
+      if (loginRefreshRequired) {
+        const offline = !currentSessionToken;
+        const conflict = hasUnsyncedChanges && hasSyncConflict;
+        return `
+          <div class="modal payout-blocking" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <p class="eyebrow">После входа</p>
+              <h2 id="modal-title">Обновить семейные данные</h2>
+              <p class="intro">${offline
+                ? "Чтобы открыть приложение, подключитесь к интернету и войдите в семейную базу."
+                : hasUnsyncedChanges
+                  ? conflict
+                    ? "На устройстве есть несинхронизированные изменения и конфликт версий. Они сохранены, но безопасно обновить семейные данные сейчас нельзя."
+                    : "Сначала отправьте сохранённые на этом устройстве изменения. Затем обновите данные из семейной базы."
+                  : "Перед продолжением загрузите последние изменения семьи."}</p>
+              ${notice ? `<p class="error" role="status">${escapeHtml(notice)}</p>` : ""}
+              <div class="form-actions">
+                ${offline
+                  ? `<button type="button" class="button" data-login-refresh-connect>Подключиться к интернету</button>`
+                  : hasUnsyncedChanges
+                    ? conflict
+                      ? `<button type="button" class="button danger" data-login-refresh-conflict>Скачать копию и принять семейные</button>`
+                      : `<button type="button" class="button" data-login-refresh-send ${isSyncing ? "disabled" : ""}>Отправить мои изменения</button>`
+                    : `<button type="button" class="button" data-login-refresh ${isSyncing ? "disabled" : ""}>Обновить</button>`}
+              </div>
+            </section>
+          </div>
+        `;
+      }
       const activeMember = state.members.find(item => item.id === currentMemberId);
       if (activeMember?.role === "child") {
         const unconfirmedPayment = state.payments.find(payment =>
@@ -1195,7 +1235,30 @@
                   ${Number(fund.debtRemaining) > 0 ? `<p class="hint">Остаток долга: ${money(fund.debtRemaining)}. Изменить или отменить долг может родитель.</p>` : ""}
                 </div>
               ` : ""}
+              ${activeMember?.role === "parent" ? `
+                <div class="settings-group">
+                  <strong>PIN родителей</strong>
+                  <p class="hint">Измените четырёхзначный PIN, который используется для входа родителя.</p>
+                  <div class="form-actions"><button type="button" class="button secondary" data-change-pin>Изменить PIN</button></div>
+                </div>
+              ` : ""}
               <div class="form-actions"><button class="button secondary" type="button" data-close-modal>Готово</button></div>
+            </section>
+          </div>
+        `;
+      }
+      if (modal.type === "change-pin") {
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">Изменить PIN родителей</h2>
+              <form id="change-pin-form">
+                <div class="field"><label for="current-pin">Текущий PIN</label><input id="current-pin" name="currentPin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="current-password" required></div>
+                <div class="field"><label for="new-pin">Новый PIN</label><input id="new-pin" name="newPin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></div>
+                <div class="field"><label for="confirm-pin">Повторите новый PIN</label><input id="confirm-pin" name="confirmPin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></div>
+                <p class="error" role="status">${escapeHtml(modal.error || "")}</p>
+                <div class="form-actions"><button class="button" type="submit">Сохранить PIN</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
+              </form>
             </section>
           </div>
         `;
@@ -1576,12 +1639,16 @@
       const progress = accountProgresses(fund);
       return `
         <div class="dashboard-head">
-          <div><p class="eyebrow">Привет, ${escapeHtml(member.name)}!</p><h1>Твои дела</h1></div>
+          <div class="dashboard-title-group">
+            <button type="button" class="icon-button dashboard-back" id="switch-profile" aria-label="Назад к выбору профиля" title="Назад к выбору профиля">
+              <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/><path d="M9 12h12"/></svg>
+            </button>
+            <div><p class="eyebrow">Привет, ${escapeHtml(member.name)}!</p><h1>Твои дела</h1></div>
+          </div>
           <div class="dashboard-actions">
             <button type="button" class="icon-button" id="open-settings" aria-label="Настройки" title="Настройки">
-              <span aria-hidden="true" style="font-size:22px;line-height:1">⚙</span>
+              <span aria-hidden="true" style="line-height:1">⚙</span>
             </button>
-            <button type="button" class="button secondary small" id="switch-profile">Сменить профиль</button>
           </div>
         </div>
         ${renderSyncPanel()}
@@ -1686,12 +1753,16 @@
       `).join("");
       return `
         <div class="dashboard-head">
-          <div><p class="eyebrow">Родитель · ${escapeHtml(member.name)}</p><h1>Семейная панель</h1></div>
+          <div class="dashboard-title-group">
+            <button type="button" class="icon-button dashboard-back" id="switch-profile" aria-label="Назад к выбору профиля" title="Назад к выбору профиля">
+              <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/><path d="M9 12h12"/></svg>
+            </button>
+            <div><p class="eyebrow">Родитель · ${escapeHtml(member.name)}</p><h1>Семейная панель</h1></div>
+          </div>
           <div class="dashboard-actions">
             <button type="button" class="icon-button" id="open-settings" aria-label="Настройки" title="Настройки">
-              <span aria-hidden="true" style="font-size:22px;line-height:1">⚙</span>
+              <span aria-hidden="true" style="line-height:1">⚙</span>
             </button>
-            <button type="button" class="button secondary small" id="switch-profile">Сменить профиль</button>
           </div>
         </div>
         ${renderSyncPanel()}
@@ -1736,8 +1807,36 @@
         ) || state.savingsRequests.some(request =>
           request.memberId === activeMember.id && request.status === "awaiting_child_confirmation"
         ));
+      if (loginRefreshRequired &&
+          !event.target.closest("[data-login-refresh], [data-login-refresh-send], [data-login-refresh-conflict], [data-login-refresh-connect]")) return;
       if (paymentConfirmationRequired &&
           !event.target.closest("#payment-confirmation-form, [data-sync-send], [data-sync-receive], [data-sync-conflict], [data-connect-online]")) return;
+
+      if (event.target.closest("[data-login-refresh]")) {
+        receiveCloudChanges();
+        return;
+      }
+
+      if (event.target.closest("[data-login-refresh-send]")) {
+        sendCloudChanges();
+        return;
+      }
+
+      if (event.target.closest("[data-login-refresh-conflict]")) {
+        receiveCloudChanges(true);
+        return;
+      }
+
+      if (event.target.closest("[data-login-refresh-connect]")) {
+        loginRefreshRequired = false;
+        offlineSession = false;
+        currentSessionToken = "";
+        currentMemberId = "";
+        selectedRole = currentRole;
+        notice = "";
+        render();
+        return;
+      }
 
       if (event.target.closest("[data-sync-send]")) {
         sendCloudChanges();
@@ -1867,6 +1966,7 @@
         const previousRole = currentRole;
         currentSessionToken = "";
         offlineSession = false;
+        loginRefreshRequired = false;
         currentMemberId = "";
         selectedRole = previousRole;
         modal = null;
@@ -1880,6 +1980,12 @@
 
       if (event.target.closest("#open-settings")) {
         modal = { type: "settings" };
+        render();
+        return;
+      }
+
+      if (event.target.closest("[data-change-pin]")) {
+        modal = { type: "change-pin", error: "" };
         render();
         return;
       }
@@ -2096,6 +2202,7 @@
         currentMemberId = response.memberId;
         currentRole = response.role;
         offlineSession = false;
+        loginRefreshRequired = true;
         if (hasUnsyncedChanges) {
           currentServerVersion = Number(localStorage.getItem(SYNC_VERSION_KEY) || 0);
         } else {
@@ -2146,6 +2253,7 @@
             offlinePinProfile && await verifyOfflinePin(pin, offlinePinProfile.memberId)) {
           if (startOfflineSession(offlinePinProfile.memberId, "parent",
             "Офлайн-вход выполнен. Изменения останутся на этом устройстве до отправки.")) {
+            loginRefreshRequired = true;
             render();
             return;
           }
@@ -2153,6 +2261,7 @@
             childProfiles.some(profile => profile.id === memberId) &&
             startOfflineSession(memberId, "child",
               "Офлайн-вход выполнен. Изменения останутся на этом устройстве до отправки.")) {
+          loginRefreshRequired = true;
           render();
           return;
         }
@@ -2165,6 +2274,10 @@
     }
 
     document.addEventListener("submit", event => {
+      if (loginRefreshRequired) {
+        event.preventDefault();
+        return;
+      }
       const activeMember = state.members.find(item => item.id === currentMemberId);
       const paymentConfirmationRequired = activeMember?.role === "child" &&
         (state.payments.some(payment =>
@@ -2174,6 +2287,54 @@
         ));
       if (paymentConfirmationRequired && event.target.id !== "payment-confirmation-form") {
         event.preventDefault();
+        return;
+      }
+
+      if (event.target.id === "change-pin-form") {
+        event.preventDefault();
+        const values = new FormData(event.target);
+        const currentPin = String(values.get("currentPin") || "");
+        const newPin = String(values.get("newPin") || "");
+        const confirmPin = String(values.get("confirmPin") || "");
+        if (!/^\d{4}$/.test(currentPin) || !/^\d{4}$/.test(newPin)) {
+          modal.error = "Введите текущий и новый PIN из четырёх цифр.";
+          render();
+          return;
+        }
+        if (newPin !== confirmPin) {
+          modal.error = "Новый PIN и его подтверждение не совпадают.";
+          render();
+          return;
+        }
+        if (offlineSession) {
+          modal.error = "Для смены семейного PIN подключитесь к интернету и войдите в семейную базу.";
+          render();
+          return;
+        }
+        (async () => {
+          if (currentSessionToken) {
+            await apiCall("changePin", { token: currentSessionToken, currentPin, newPin });
+            try {
+              await saveOfflinePin(newPin, currentMemberId);
+            } catch (error) {
+              console.error("Семейный PIN изменён, но не удалось обновить его офлайн-проверку.", error);
+              modal = null;
+              notice = "Семейный PIN изменён. Не удалось обновить офлайн-проверку PIN на этом устройстве.";
+              render();
+              return;
+            }
+          } else {
+            await verifyParentPin(currentPin);
+            state.pin = newPin;
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          }
+          modal = null;
+          notice = "PIN родителей изменён.";
+          render();
+        })().catch(error => {
+          if (modal) modal.error = error.message;
+          render();
+        });
         return;
       }
 
