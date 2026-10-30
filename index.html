@@ -214,7 +214,10 @@
     .balance-label { color: var(--green); font-size: 14px; font-weight: 650; }
     .balance-value { margin-top: 5px; font-size: clamp(30px, 7vw, 40px); font-weight: 800; letter-spacing: -1px; }
     .fund-progress { margin-top: 10px; min-width: min(60vw, 330px); }
-    .fund-progress-label { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
+    .fund-progress-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
+    .fund-progress-title { display: flex; align-items: center; gap: 7px; }
+    .growth-icon { width: 30px; height: 30px; flex: 0 0 auto; }
+    .growth-celebration { font-size: 25px; line-height: 1; }
     .progress-track { height: 7px; margin-top: 5px; overflow: hidden; border-radius: 99px; background: var(--card); }
     .progress-fill { height: 100%; border-radius: inherit; background: var(--green); }
     .balance-icon { font-size: 34px; }
@@ -273,6 +276,7 @@
     .request-meta { margin-top: 5px; color: var(--muted); font-size: 13px; }
     .request-comment { margin-top: 10px; line-height: 1.45; overflow-wrap: anywhere; }
     .request-actions { display: flex; flex-shrink: 0; gap: 7px; }
+    .request-rejected-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
     .delete-request {
       position: absolute;
       top: 10px;
@@ -386,6 +390,7 @@
       .request { flex-direction: column; }
       .request-actions { width: 100%; }
       .request-actions .button { flex: 1; }
+      .request-rejected-actions .button { flex: 1 1 140px; }
       .dashboard-head { align-items: center; }
       .dashboard-title-group { min-width: 0; }
       .dashboard-title-group h1 { font-size: clamp(25px, 7vw, 36px); }
@@ -884,20 +889,62 @@
       const progress = [];
       if (Number(fund.debtRemaining) > 0 && Number(fund.debtTarget) > 0) {
         progress.push({
+          type: "debt",
           label: `Погашение долга · ${money(fund.debtPaidTotal)} из ${money(fund.debtTarget)}`,
           value: Math.min(100, Number(fund.debtPaidTotal) / Number(fund.debtTarget) * 100)
         });
       }
       if (Number(fund.savingsTarget) > 0) {
         progress.push({
+          type: "savings",
           label: `Накоплено ${money(fund.savingsBalance)} из ${money(fund.savingsTarget)}`,
           value: Math.min(100, Number(fund.savingsBalance) / Number(fund.savingsTarget) * 100)
         });
       }
       if (!progress.length && Number(fund.debtTarget) > 0) {
-        progress.push({ label: `Долг погашен · ${money(fund.debtPaidTotal)}`, value: 100 });
+        progress.push({ type: "debt", label: `Долг погашен · ${money(fund.debtPaidTotal)}`, value: 100 });
       }
       return progress;
+    }
+
+    function renderGrowthIcon(value) {
+      const progress = Math.max(0, Math.min(100, Number(value) || 0));
+      const stage = progress >= 100 ? 10 : Math.floor(progress / 10);
+      if (stage === 10) return `<span class="growth-icon growth-celebration" role="img" aria-label="Цель достигнута">🥳</span>`;
+
+      const leafPositions = [
+        [[25, 22, -35]],
+        [[19, 26, -40], [30, 20, 35]],
+        [[18, 30, -45], [29, 24, 35], [22, 17, -35]],
+        [[17, 31, -45], [30, 29, 40], [19, 21, -35], [29, 18, 35]],
+        [[16, 32, -45], [31, 31, 40], [17, 23, -35], [30, 22, 35], [23, 15, -5]]
+      ];
+      const broadCrown = [[13, 26], [18, 18], [25, 14], [32, 18], [37, 26], [32, 32], [18, 32], [25, 23]];
+      const leaves = stage < 5
+        ? leafPositions[stage].map(([x, y, angle]) =>
+          `<ellipse cx="${x}" cy="${y}" rx="4" ry="7" transform="rotate(${angle} ${x} ${y})"/>`
+        ).join("")
+        : (stage === 5
+          ? [[16, 22], [32, 22]]
+          : stage === 6
+            ? [[16, 24], [25, 16], [34, 24]]
+            : stage === 7
+              ? [[14, 25], [19, 17], [25, 14], [31, 17], [36, 25]]
+              : broadCrown
+        ).map(([x, y]) => `<circle cx="${x}" cy="${y}" r="${stage >= 8 ? 6 : 5}"/>`).join("");
+      const branches = stage < 5
+        ? "M25 42V20"
+        : stage === 5
+          ? "M25 42V24M25 34L17 26M25 34L33 26"
+          : stage === 6
+            ? "M25 42V20M25 34L17 26M25 30L33 22"
+            : stage === 7
+              ? "M25 42V18M25 35L15 27M25 31L35 23M25 26L18 19M25 25L32 18"
+              : "M25 42V17M25 36L14 29M25 33L36 27M25 29L15 22M25 26L35 19M25 22L19 15M25 22L31 15";
+      const fruits = stage === 9
+        ? `<circle cx="18" cy="24" r="2.5" fill="#d55b45" stroke="none"/><circle cx="32" cy="27" r="2.5" fill="#d55b45" stroke="none"/><circle cx="25" cy="17" r="2.5" fill="#d55b45" stroke="none"/>`
+        : "";
+      return `<svg class="growth-icon" viewBox="0 0 50 50" role="img" aria-label="Росток: ${Math.round(progress)} процентов цели" fill="#5b9d56" stroke="#477746" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="${branches}" fill="none" stroke="#815b3b" stroke-width="2.5"/>${leaves}${fruits}</svg>`;
     }
 
     function applyChoreAllocation(memberId, amount) {
@@ -1466,19 +1513,54 @@
         const request = state.requests.find(item =>
           item.id === modal.requestId &&
           item.memberId === currentMemberId &&
-          item.status === "pending"
+          (item.status === "pending" || item.status === "rejected")
         );
         if (!request) return "";
         return `
           <div class="modal" role="presentation">
             <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-              <h2 id="modal-title">Удалить отправленное дело?</h2>
+              <h2 id="modal-title">${request.status === "rejected" ? "Удалить отклонённое дело?" : "Удалить отправленное дело?"}</h2>
               <p class="intro">${escapeHtml(request.taskTitle)} · ${money(request.price)}</p>
-              <p class="hint">Заявка исчезнет из списка родителя. Это действие нельзя отменить.</p>
+              <p class="hint">${request.status === "rejected" ? "Отклонённая заявка будет удалена из вашей истории. Это действие нельзя отменить." : "Заявка исчезнет из списка родителя. Это действие нельзя отменить."}</p>
               <div class="form-actions">
                 <button class="button danger" type="button" data-confirm-delete="${escapeHtml(request.id)}">Удалить</button>
                 <button class="button secondary" type="button" data-close-modal>Оставить</button>
               </div>
+            </section>
+          </div>
+        `;
+      }
+      if (modal.type === "retry-request") {
+        const request = state.requests.find(item =>
+          item.id === modal.requestId &&
+          item.memberId === currentMemberId &&
+          item.status === "rejected"
+        );
+        if (!request) return "";
+        const availableTasks = state.tasks.filter(task =>
+          task.active && (!task.visibleTo || task.visibleTo === currentMemberId)
+        );
+        const selectedTask = availableTasks.some(task => task.id === request.taskId)
+          ? request.taskId
+          : availableTasks[0]?.id || "";
+        return `
+          <div class="modal" role="presentation">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+              <h2 id="modal-title">Исправить и отправить заново</h2>
+              <p class="intro">${escapeHtml(request.taskTitle)} · ${money(request.price)}</p>
+              ${request.parentComment ? `<p class="request-comment">Ответ родителя: ${escapeHtml(request.parentComment)}</p>` : ""}
+              ${availableTasks.length ? `
+                <form id="retry-request-form">
+                  <div class="field"><label for="retry-task">Дело</label><select id="retry-task" name="taskId" required>${availableTasks.map(task => `<option value="${escapeHtml(task.id)}" ${task.id === selectedTask ? "selected" : ""}>${escapeHtml(task.title)} · ${money(task.price)}</option>`).join("")}</select></div>
+                  <div class="field"><label for="retry-comment">Комментарий (необязательно)</label><textarea id="retry-comment" name="comment" maxlength="500">${escapeHtml(request.comment || "")}</textarea></div>
+                  <p class="hint">Отклонённая заявка останется в истории. Родителю будет отправлена новая заявка.</p>
+                  <p class="error" id="modal-error">${escapeHtml(modal.error || "")}</p>
+                  <div class="form-actions"><button class="button" type="submit">Отправить заново</button><button class="button secondary" type="button" data-close-modal>Отмена</button></div>
+                </form>
+              ` : `
+                <p class="hint">Сейчас нет доступных дел для повторной отправки. Попроси родителя добавить или включить дело.</p>
+                <div class="form-actions"><button class="button secondary" type="button" data-close-modal>Закрыть</button></div>
+              `}
             </section>
           </div>
         `;
@@ -1615,6 +1697,10 @@
             ${request.comment ? `<div class="request-comment">${escapeHtml(request.comment)}</div>` : ""}
             <div class="request-meta status ${request.status}">${request.status === "pending" ? "Ждёт подтверждения" : request.status === "approved" ? "Подтверждено" : "Отклонено"}</div>
             ${request.parentComment ? `<div class="request-meta">Ответ родителя: ${escapeHtml(request.parentComment)}</div>` : ""}
+            ${request.status === "rejected" ? `<div class="request-rejected-actions">
+              <button type="button" class="button secondary small" data-retry-request="${escapeHtml(request.id)}">Исправить и отправить заново</button>
+              <button type="button" class="button danger small" data-delete-request="${escapeHtml(request.id)}">Удалить</button>
+            </div>` : ""}
           </div>
           ${request.status === "pending" ? `<button type="button" class="delete-request" data-delete-request="${escapeHtml(request.id)}" aria-label="Удалить отправленное дело" title="Удалить заявку"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg></button>` : ""}
         </article>
@@ -1661,7 +1747,7 @@
               </button>
             </div>
             <div class="balance-value">${money(memberBalance(member.id))}</div>
-            ${progress.map(item => `<div class="fund-progress"><div class="fund-progress-label"><span>${escapeHtml(item.label)}</span></div><div class="progress-track"><div class="progress-fill" style="width:${item.value}%"></div></div></div>`).join("")}
+            ${progress.map(item => `<div class="fund-progress"><div class="fund-progress-label"><span class="fund-progress-title">${renderGrowthIcon(item.value)}<span>${escapeHtml(item.label)}</span></span></div><div class="progress-track"><div class="progress-fill" style="width:${item.value}%"></div></div></div>`).join("")}
             ${unconfirmedPayment ? `<p class="payout-note">${money(unconfirmedPayment.amount)} · Выплата не подтверждена</p>` : ""}
             ${unconfirmedSavings ? `<p class="payout-note">${money(unconfirmedSavings.amount)} · Выплата из накоплений не подтверждена</p>` : ""}
             ${state.payments.some(payment => payment.memberId === member.id && payment.status === "requested") ? `<p class="payout-note">Запрос выплаты ожидает родителя</p>` : ""}
@@ -2128,10 +2214,23 @@
         const request = state.requests.find(item =>
           item.id === deleteRequestButton.dataset.deleteRequest &&
           item.memberId === currentMemberId &&
-          item.status === "pending"
+          (item.status === "pending" || item.status === "rejected")
         );
         if (!request) return;
         modal = { type: "delete-request", requestId: request.id };
+        render();
+        return;
+      }
+
+      const retryRequestButton = event.target.closest("[data-retry-request]");
+      if (retryRequestButton) {
+        const request = state.requests.find(item =>
+          item.id === retryRequestButton.dataset.retryRequest &&
+          item.memberId === currentMemberId &&
+          item.status === "rejected"
+        );
+        if (!request) return;
+        modal = { type: "retry-request", requestId: request.id, error: "" };
         render();
         return;
       }
@@ -2141,7 +2240,7 @@
         const requestIndex = state.requests.findIndex(item =>
           item.id === confirmDeleteButton.dataset.confirmDelete &&
           item.memberId === currentMemberId &&
-          item.status === "pending"
+          (item.status === "pending" || item.status === "rejected")
         );
         if (requestIndex === -1) return;
         state.requests.splice(requestIndex, 1);
@@ -2699,6 +2798,40 @@
         });
         modal = null;
         saveState();
+        render();
+      }
+
+      if (event.target.id === "retry-request-form") {
+        event.preventDefault();
+        const request = state.requests.find(item =>
+          item.id === modal?.requestId &&
+          item.memberId === currentMemberId &&
+          item.status === "rejected"
+        );
+        const taskId = String(new FormData(event.target).get("taskId") || "");
+        const task = state.tasks.find(item =>
+          item.id === taskId && item.active && (!item.visibleTo || item.visibleTo === currentMemberId)
+        );
+        if (!request || !task) {
+          if (modal) modal.error = "Выбранное дело больше недоступно. Обновите список и попробуйте снова.";
+          render();
+          return;
+        }
+        const comment = String(new FormData(event.target).get("comment") || "").trim().slice(0, 500);
+        state.requests.push({
+          id: crypto.randomUUID(),
+          memberId: currentMemberId,
+          taskId: task.id,
+          taskTitle: task.title,
+          price: Number(task.price),
+          comment,
+          createdAt: new Date().toISOString(),
+          status: "pending",
+          parentComment: ""
+        });
+        modal = null;
+        saveState();
+        notice = "Исправленная заявка отправлена заново. Предыдущий отказ сохранён в истории.";
         render();
       }
 

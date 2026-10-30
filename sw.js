@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "family-chores-shell-v9";
+const CACHE_NAME = "family-chores-shell-v10";
 const APP_URL = new URL("./", self.location.href);
 const INDEX_URL = new URL("./index.html", self.location.href);
 const APP_SHELL = [
